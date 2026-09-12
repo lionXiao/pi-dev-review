@@ -250,6 +250,106 @@ export default function (pi: any) {
     notify(`dev-review 纪律已挂起至 ${untilText}（理由：${reason}）；已写入审计日志。`, "info");
   };
 
+  // ---- Background workflow runs ------------------------------------------
+  // run/start no longer block the agent turn: the engine keeps running in the
+  // background while a widget tracks progress, so the user can keep chatting.
+  // When the loop stops, a summary user message wakes the main agent.
+  const RUN_STATUS_KEY = "dev-review-run";
+  const RUN_WIDGET_KEY = "dev-review-run";
+  let backgroundRun: { startedAt: number; lastMessage: string; timer: ReturnType<typeof setInterval> | null } | null = null;
+
+  const summarizeRunStatus = (message: string) => {
+    const text = String(message || "");
+    if (/passed|pass(ed)? after/i.test(text)) return "passed";
+    if (/human decision|blocked/i.test(text)) return "blocked";
+    if (/max rounds/i.test(text)) return "max-rounds";
+    return "stopped";
+  };
+
+  const renderRunWidget = (ctx: any) => {
+    try {
+      if (!backgroundRun) {
+        ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
+        return;
+      }
+      const seconds = Math.max(0, Math.floor((Date.now() - backgroundRun.startedAt) / 1000));
+      const clock = `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+      ctx?.ui?.setWidget?.(
+        RUN_WIDGET_KEY,
+        [
+          `dev-review ▶ 运行中 ${clock}`,
+          backgroundRun.lastMessage || "启动中…",
+          "输入不会被阻塞 · 详情用 dev_review_status",
+        ],
+        { placement: "belowEditor" },
+      );
+      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${clock}`);
+    } catch {}
+  };
+
+  const finishBackgroundRun = (ctx: any, result: { ok?: boolean; message?: string }) => {
+    const message = result?.message || "dev-review 运行结束（无消息）";
+    if (backgroundRun?.timer) clearInterval(backgroundRun.timer);
+    backgroundRun = null;
+    renderRunWidget(ctx);
+    try {
+      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${summarizeRunStatus(message)}`);
+    } catch {}
+    workflowNotify(message);
+    const text = `[dev-review] 后台运行结束：${message}\n请用 dev_review_status 查看详情，并向用户汇报下一步（若是 blocked，说明需要用户决定什么）。`;
+    try {
+      if (ctx?.isIdle?.() === false) pi.sendUserMessage(text, { deliverAs: "followUp" });
+      else pi.sendUserMessage(text);
+    } catch {
+      try {
+        pi.sendUserMessage(text, { deliverAs: "followUp" });
+      } catch {}
+    }
+  };
+
+  const startBackgroundRun = (args: string, ctx: any): { ok: boolean; message: string } => {
+    if (backgroundRun) {
+      const seconds = Math.max(0, Math.floor((Date.now() - backgroundRun.startedAt) / 1000));
+      return {
+        ok: false,
+        message: `后台已有运行中的工作流（已运行 ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s）：${backgroundRun.lastMessage}。用 dev_review_status 查看详情。`,
+      };
+    }
+    backgroundRun = { startedAt: Date.now(), lastMessage: "启动中…", timer: null };
+    const update = (message: string) => {
+      if (!backgroundRun) return;
+      backgroundRun.lastMessage = String(message).replace(/\s+/g, " ").trim().slice(0, 120) || "…";
+      renderRunWidget(ctx);
+    };
+    backgroundRun.timer = setInterval(() => renderRunWidget(ctx), 1000);
+    renderRunWidget(ctx);
+    void runCommand({
+      args,
+      cwd: ctx?.cwd || process.cwd(),
+      piInvocation: currentPiInvocation(),
+      notify: update,
+      onReport: async (report: WorkflowReport) => {
+        try {
+          pi.appendEntry<WorkflowReport>("dev-review-report", report);
+        } catch {}
+        update(`${report.role} r${report.round} · ${report.status}`);
+      },
+    })
+      .then((result) => finishBackgroundRun(ctx, result))
+      .catch((error) =>
+        finishBackgroundRun(ctx, { ok: false, message: `dev-review 后台运行失败：${error?.message || String(error)}` }),
+      );
+    return {
+      ok: true,
+      message: "已在后台启动 dev-review（不阻塞输入）。进度见编辑器下方状态条；结束时会有总结消息。可用 dev_review_status 随时查看。",
+    };
+  };
+
+  pi.on("session_shutdown", () => {
+    if (backgroundRun?.timer) clearInterval(backgroundRun.timer);
+    backgroundRun = null;
+  });
+
   // Tools: let the main agent drive the formal workflow steps on the user's
   // behalf. The coordinator LLM can then translate natural-language decisions
   // ("同意，重录吧") into the protocol's resolve step without learning commands.
@@ -296,7 +396,10 @@ export default function (pi: any) {
         piInvocation: currentPiInvocation(),
       });
       const line = await disciplineStatusLine(ctx?.cwd || process.cwd());
-      return { content: [{ type: "text", text: `${result.message}\n\n${line}` }], details: {} };
+      const runLine = backgroundRun
+        ? `[run] 后台运行中：${backgroundRun.lastMessage}`
+        : "[run] 无后台运行";
+      return { content: [{ type: "text", text: `${result.message}\n\n${line}\n${runLine}` }], details: {} };
     },
   });
 
@@ -349,25 +452,13 @@ export default function (pi: any) {
     name: "dev_review_run",
     label: "Dev-review run",
     description:
-      "Continue the dev-review workflow loop after a decision was resolved (or resume an interrupted/paused one). " +
-      "Blocks until the loop stops (pass / blocked for human / max rounds). Call after dev_review_resolve succeeds.",
+      "Start or resume the dev-review workflow loop in the background (non-blocking). Returns immediately; " +
+      "progress is shown in a status widget and a summary message wakes the agent when the loop stops " +
+      "(pass / blocked for human / max rounds). Use dev_review_status for details.",
     parameters: Type.Object({}),
     async execute(toolCallId: any, params: any, signal: any, onUpdate: any, ctx: any) {
-      const result = await runCommand({
-        args: ["run"],
-        cwd: ctx?.cwd || process.cwd(),
-        piInvocation: currentPiInvocation(),
-        // Stream live progress into the tool call UI
-        notify: (message: string) => onUpdate?.({ content: [{ type: "text", text: message }] }),
-        // Append per-round reports / escalations into the session transcript
-        onReport: async (report: WorkflowReport) => {
-          try {
-            pi.appendEntry<WorkflowReport>("dev-review-report", report);
-          } catch {}
-        },
-      });
-      workflowNotify(result.message);
-      return { content: [{ type: "text", text: result.message }], details: {} };
+      const started = startBackgroundRun("run", ctx);
+      return { content: [{ type: "text", text: started.message }], details: {} };
     },
   });
 
@@ -395,8 +486,16 @@ export default function (pi: any) {
       };
 
       // The discipline escape hatch is handled locally, before the engine.
-      if ((args.trim().split(/\s+/)[0] || "") === "escape") {
+      const command = args.trim().split(/\s+/)[0] || "";
+      if (command === "escape") {
         await handleEscape(args, ctx, notify);
+        return;
+      }
+
+      // run / start execute in the background so the conversation is never queued.
+      if (command === "run" || command === "start") {
+        const started = startBackgroundRun(args, ctx);
+        notify(started.message);
         return;
       }
 
@@ -407,13 +506,6 @@ export default function (pi: any) {
         notify,
         onReport,
       });
-
-      // Push a desktop notification for long-running commands so the user can
-      // leave the window while the loop runs. Short commands stay silent.
-      const command = args.trim().split(/\s+/)[0] || "";
-      if (command === "run" || command === "start") {
-        workflowNotify(result.message);
-      }
 
       if (!ctx.hasUI) {
         console.log(result.message);

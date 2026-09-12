@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 — 2026-09-12
+
+- **后台运行**：`dev_review_run` 工具与 `/dev-review run|start` 不再阻塞主 agent 回合——引擎在进程内后台执行，编辑器下方显示每秒更新的进度条（运行时长 + 最近引擎事件），底部状态栏同步；停止时自动注入总结消息唤醒主 agent（pass / blocked / max-rounds / 失败）。
+- 同一时间只允许一个后台运行；`dev_review_status` 输出增加 `[run]` 行；`session_shutdown` 清理监控定时器。
+- 待办：引擎暂无 abort 接口，不支持中途取消（README §3.4 / known-issues 已注明）。
+
 ## 0.1.0 — 2026-09-12
 
 首个版本，包含：

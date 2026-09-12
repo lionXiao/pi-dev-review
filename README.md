@@ -114,6 +114,15 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 
 决策文件要点：**选了什么 + 要 developer 干什么**，文采不重要。想反问也可以写在里面（"先回答 X 再继续"），dev 下一轮会先回答。
 
+### 3.4 后台运行（不阻塞对话）
+
+`run` / `start` 不阻塞主 agent 的回合：引擎在后台继续跑，编辑器下方有一条实时更新的进度条（运行时长 · 最近引擎事件 · 轮次），底部状态栏同步显示。你可以随时继续聊天，主 agent 也能正常回复。机器停止时（pass / blocked / max-rounds）会有一条总结消息自动唤醒主 agent，直接给出结果与下一步。
+
+- 进度条：`dev-review ▶ 运行中 3m12s` + 最近一条引擎事件，每秒更新；
+- 随时查询：`dev_review_status` 工具或 `/dev-review status`，输出带 `[run]` 行；
+- 同一时间只允许一个后台运行，重复启动会被拒绝；
+- 目前不提供中途取消（引擎无 abort 接口）：要停只能等到停止条件，或 `/dev-review escape` 挂起纪律后手动处理。
+
 ### 3.3 日常命令
 
 ```text
@@ -141,6 +150,7 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 1. **TUI 实时流**：子 Agent 每个工具调用/助手消息/失败以事件形式推到主 TUI（dev/reviewer r{N} 前缀）。设 `DEV_REVIEW_STREAM=0` 关闭。
 2. **每轮条目**：`◆ Development` / `◇ Review` / `⚠ Escalation` markdown 条目追加进会话流（Ctrl+O 展开，含完整 handoff）。
 3. **磁盘全量**：`handoffs/`（每轮 JSON+MD）、`reports/`（最终报告）、`private/*-sessions/*.jsonl`（两边的完整过程，可用 `pi --session-dir ... -r` 交互回看）。
+4. **后台运行进度条**：`run` / `start` 后台执行时，编辑器下方显示实时进度（运行时长 + 最近引擎事件），主 agent 回合不被占用；停止时注入总结消息。
 
 ## 6. 版本 v2 相对原包的改进清单
 
