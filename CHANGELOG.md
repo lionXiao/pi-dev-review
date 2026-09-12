@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 — 2026-09-12
+
+- `discipline.md` 吸收两条原先只写在项目 CLAUDE.md 里的通用规则：实现细节讨论引导（dev 私有 session + resolve note 带回结论）、工作树非工作流变更的归因纪律；解除纪律后的改动也明确要求留痕「未经工作流评审」。项目 CLAUDE.md 可据此只保留降级兜底 + 项目级改动分级。
+
 ## 0.3.1 — 2026-09-12
 
 - **`run` 不再静默无操作**：当活跃实例已 `passed` 且计划文件自冻结后已改变时（典型场景：下一批次修订了计划，应新建实例），`run` 现在会报错并给出 action：`plan changed (oldhash -> newhash): run start ...`。之前它返回 ok:true 的友好提示，容易被误认为启动成功（真实事故：批 2 改计划后主 agent 调 run 未生效，只能绕 bash）。新增导出 `planChangedSinceFrozen` + 单测。
