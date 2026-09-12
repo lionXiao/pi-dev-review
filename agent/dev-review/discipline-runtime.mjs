@@ -131,6 +131,10 @@ export async function readWorkflowState(projectRoot) {
       currentRound: state.currentRound ?? null,
       maxRounds: state.config?.maxReviewRounds ?? null,
       updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null,
+      developerModel: typeof state.config?.developerModel === "string" ? state.config.developerModel : null,
+      reviewerModel: typeof state.config?.reviewerModel === "string" ? state.config.reviewerModel : null,
+      developerThinking: typeof state.config?.developerThinking === "string" ? state.config.developerThinking : null,
+      reviewerThinking: typeof state.config?.reviewerThinking === "string" ? state.config.reviewerThinking : null,
       openIssue: issue
         ? { id: issue.id, severity: issue.severity, requirement: issue.requirement || "" }
         : null,

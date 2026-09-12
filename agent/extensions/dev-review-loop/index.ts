@@ -300,7 +300,7 @@ export default function (pi: any) {
   const RUN_STATUS_KEY = "dev-review-run";
   const RUN_WIDGET_KEY = "dev-review-run";
   const EXTERNAL_POLL_MS = Number(process.env.DEV_REVIEW_POLL_MS || 10000);
-  let backgroundRun: { startedAt: number; lastMessage: string; timelinePath?: string; timer: ReturnType<typeof setInterval> | null } | null = null;
+  let backgroundRun: { startedAt: number; lastMessage: string; timelinePath?: string; roleLine?: string; timer: ReturnType<typeof setInterval> | null } | null = null;
   let externalRun: { timer: ReturnType<typeof setInterval>; startedAt: number } | null = null;
   // Last terminal state (blocked/passed) this session has already told the main
   // agent about; prevents repeating the wake-up message on every user turn.
@@ -355,6 +355,44 @@ export default function (pi: any) {
     return lines.join("\n");
   };
 
+  // "dev r1 · opencode-go/deepseek-flash · thinking max" — which role is running,
+  // with which provider/model and thinking level. Provider comes from the
+  // provider/model config string.
+  const roleLineFor = (workflow: any) => {
+    const phase = String(workflow?.phase || "").toLowerCase();
+    const isReview = phase === "review";
+    const model = (isReview ? workflow?.reviewerModel : workflow?.developerModel) || null;
+    const thinking = (isReview ? workflow?.reviewerThinking : workflow?.developerThinking) || null;
+    if (!model && !workflow?.found) return null;
+    // During the development phase state.currentRound still holds the previous
+    // round (it is committed after the developer report is written).
+    const round = isReview
+      ? workflow?.currentRound ?? "?"
+      : (workflow?.currentRound ?? 0) + 1;
+    const role = `${isReview ? "review" : "dev"} r${round}`;
+    if (!model) return role;
+    const slash = model.indexOf("/");
+    const provider = slash > 0 ? model.slice(0, slash) : null;
+    const name = slash > 0 ? model.slice(slash + 1) : model;
+    return [role, provider ? `${provider} / ${name}` : name, thinking ? `thinking ${thinking}` : null]
+      .filter(Boolean)
+      .join(" · ");
+  };
+
+  /** Compact model summary for stopped/idle states: both roles at a glance. */
+  const configLineFor = (workflow: any) => {
+    const short = (model: string | null, thinking: string | null) => {
+      if (!model) return null;
+      const slash = model.indexOf("/");
+      const name = slash > 0 ? model.slice(slash + 1) : model;
+      return `${name}${thinking ? ` (${thinking})` : ""}`;
+    };
+    const dev = short(workflow?.developerModel, workflow?.developerThinking);
+    const review = short(workflow?.reviewerModel, workflow?.reviewerThinking);
+    if (!dev && !review) return null;
+    return [`dev: ${dev || "?"}`, `review: ${review || "?"}`].join(" · ");
+  };
+
   const renderRunWidget = (ctx: any) => {
     try {
       if (!backgroundRun) {
@@ -363,29 +401,38 @@ export default function (pi: any) {
       }
       const seconds = Math.max(0, Math.floor((Date.now() - backgroundRun.startedAt) / 1000));
       const clock = `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
-      ctx?.ui?.setWidget?.(
-        RUN_WIDGET_KEY,
-        [
-          `dev-review ▶ 运行中 ${clock}`,
-          backgroundRun.lastMessage || "启动中…",
-          backgroundRun.timelinePath ? `日志：${backgroundRun.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
-        ],
-        { placement: "belowEditor" },
+      const lines = [`dev-review ▶ 运行中 ${clock}`];
+      if (backgroundRun.roleLine) lines.push(backgroundRun.roleLine);
+      lines.push(backgroundRun.lastMessage ? `最近：${backgroundRun.lastMessage}` : "启动中…");
+      lines.push(
+        backgroundRun.timelinePath ? `日志：${backgroundRun.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
       );
-      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${clock}`);
+      ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, lines, { placement: "belowEditor" });
+      const role = backgroundRun.roleLine ? ` · ${backgroundRun.roleLine.split(" · ")[0]}` : "";
+      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${clock}${role}`);
     } catch {}
   };
 
-  // The engine writes the workflow state (and thus the timeline path) a moment
-  // after a managed run starts; pick it up and surface it in the widget.
-  const refreshRunTimelinePath = async (ctx: any) => {
-    if (!backgroundRun || backgroundRun.timelinePath) return;
+  // The engine writes the workflow state (and thus the timeline path plus the
+  // active role/model) a moment after a managed run starts; pick it up and
+  // surface it in the widget.
+  const refreshRunWorkflow = async (ctx: any) => {
+    if (!backgroundRun) return;
+    if (backgroundRun.timelinePath && backgroundRun.roleLine) return;
     try {
       const workflow = await readWorkflowState(findProjectRoot(ctx?.cwd || process.cwd()));
-      if (workflow.found && workflow.timelinePath) {
+      if (!workflow.found) return;
+      let changed = false;
+      if (workflow.timelinePath && !backgroundRun.timelinePath) {
         backgroundRun.timelinePath = workflow.timelinePath;
-        renderRunWidget(ctx);
+        changed = true;
       }
+      const roleLine = roleLineFor(workflow);
+      if (roleLine && roleLine !== backgroundRun.roleLine) {
+        backgroundRun.roleLine = roleLine;
+        changed = true;
+      }
+      if (changed) renderRunWidget(ctx);
     } catch {}
   };
 
@@ -403,16 +450,16 @@ export default function (pi: any) {
   const renderExternalWidget = (ctx: any, workflow: any) => {
     try {
       const round = `${workflow?.currentRound ?? "?"}/${workflow?.maxRounds ?? "?"}`;
-      ctx?.ui?.setWidget?.(
-        RUN_WIDGET_KEY,
-        [
-          `dev-review ▶ 运行中 · r${round}（外部启动）`,
-          `最近引擎更新：${agoLabel(workflow?.updatedAt)}`,
-          workflow?.timelinePath ? `日志：${workflow.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
-        ],
-        { placement: "belowEditor" },
+      const lines = [`dev-review ▶ 运行中 · r${round}（外部启动）`];
+      const roleLine = roleLineFor(workflow);
+      if (roleLine) lines.push(roleLine);
+      lines.push(`最近引擎更新：${agoLabel(workflow?.updatedAt)}`);
+      lines.push(
+        workflow?.timelinePath ? `日志：${workflow.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
       );
-      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: running r${round}`);
+      ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, lines, { placement: "belowEditor" });
+      const role = roleLine ? ` ${roleLine.split(" · ")[0]}` : ` r${round}`;
+      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: running${role}`);
     } catch {}
   };
 
@@ -470,15 +517,18 @@ export default function (pi: any) {
     try {
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, label ? `dev-review: ${label}` : undefined);
     } catch {}
-    // Keep the path of the unified timeline visible while the workflow is in a
-    // state where the user may want to inspect it (blocked / ready).
+    // Keep the path of the unified timeline and the configured models visible
+    // while the workflow is in a state where the user may want to inspect it
+    // (blocked / ready).
     try {
       if (workflow?.found && workflow.timelinePath && (status === "blocked" || status === "ready")) {
-        ctx?.ui?.setWidget?.(
-          RUN_WIDGET_KEY,
-          [`dev-review ${label || status}`, `日志：${workflow.timelinePath}`],
-          { placement: "belowEditor" },
-        );
+        const lines = [`dev-review ${label || status}`];
+        const roleLine = roleLineFor(workflow);
+        const configLine = configLineFor(workflow);
+        if (status === "ready" && roleLine) lines.push(roleLine);
+        else if (configLine) lines.push(configLine);
+        lines.push(`日志：${workflow.timelinePath}`);
+        ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, lines, { placement: "belowEditor" });
       } else {
         ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
       }
@@ -533,7 +583,7 @@ export default function (pi: any) {
       renderRunWidget(ctx);
     };
     backgroundRun.timer = setInterval(() => {
-      void refreshRunTimelinePath(ctx);
+      void refreshRunWorkflow(ctx);
       renderRunWidget(ctx);
     }, 1000);
     renderRunWidget(ctx);

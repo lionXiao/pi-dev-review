@@ -92,7 +92,7 @@ async function blockedFixture() {
         sha256: "a".repeat(64),
       },
       base: { head: "b".repeat(40) },
-      config: { maxReviewRounds: 10, developerModel: "x/y", reviewerModel: "z/w" },
+      config: { maxReviewRounds: 10, developerModel: "x/y", reviewerModel: "z/w", developerThinking: "max", reviewerThinking: "high" },
       openIssues: [],
       blocked: {
         reason: "reviewer-spec-blocked",
@@ -118,6 +118,9 @@ test("status: shows blocked details and the unified timeline path", async () => 
     assert.ok(result.message.includes("Q1: 谁验收？"));
     assert.ok(result.message.includes("1) 用户"));
     assert.ok(result.message.includes("Timeline: .ai-dev-review/demo--abc12345/reports/timeline.md"));
+    assert.ok(result.message.includes("Developer model: x/y · thinking max"));
+    assert.ok(result.message.includes("Reviewer model: z/w · thinking high"));
+    assert.ok(result.message.includes("Active role: human_decision"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

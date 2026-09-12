@@ -30,7 +30,13 @@ function stateFixture(status = "blocked") {
     status,
     phase: "human_decision",
     currentRound: 3,
-    config: { maxReviewRounds: 10 },
+    config: {
+      maxReviewRounds: 10,
+      developerModel: "opencode-go/deepseek-flash",
+      reviewerModel: "bigfish/gpt-5.6-luna",
+      developerThinking: "max",
+      reviewerThinking: "high",
+    },
     openIssues: [{ id: "R1-001", severity: "major", requirement: "举例" }],
     blocked: {
       reason: "reviewer-spec-blocked",
@@ -82,6 +88,10 @@ test("readWorkflowState: reads pointer + state, degrades gracefully", async () =
     { question: "纯字符串问题", options: [] },
   ]);
   assert.equal(wf.timelinePath, ".ai-dev-review/demo--abc12345/reports/timeline.md");
+  assert.equal(wf.developerModel, "opencode-go/deepseek-flash");
+  assert.equal(wf.reviewerModel, "bigfish/gpt-5.6-luna");
+  assert.equal(wf.developerThinking, "max");
+  assert.equal(wf.reviewerThinking, "high");
 
   assert.deepEqual(await readWorkflowState(null), { found: false });
   assert.deepEqual(await readWorkflowState(join(root, "nope")), { found: false });

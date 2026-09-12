@@ -1138,7 +1138,7 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
   }
   args.push(task);
 
-  notify?.(`${developer ? "Development" : "Review"} agent: round ${round} started.`);
+  notify?.(`${developer ? "Development" : "Review"} agent: round ${round} started (${config.model}${config.thinking ? ` · thinking ${config.thinking}` : ""}).`);
   const output = await new Promise((resolve, reject) => {
     const child = spawn(piInvocation.command, args, {
       cwd: state.projectRoot,
@@ -1325,8 +1325,9 @@ function stateStatus(state, paths) {
     `Plan snapshot: ${relativeTo(state.projectRoot, path.resolve(state.projectRoot, state.plan.snapshotPath))}`,
     `Base commit: ${state.base.head}`,
     `Round: ${state.currentRound}/${state.config.maxReviewRounds}`,
-    `Developer model: ${state.config.developerModel}`,
-    `Reviewer model: ${state.config.reviewerModel}`,
+    `Developer model: ${state.config.developerModel}${state.config.developerThinking ? ` · thinking ${state.config.developerThinking}` : ""}`,
+    `Reviewer model: ${state.config.reviewerModel}${state.config.reviewerThinking ? ` · thinking ${state.config.reviewerThinking}` : ""}`,
+    `Active role: ${state.phase === "review" ? `review r${state.currentRound}` : state.phase === "development" ? `dev r${state.currentRound + 1}` : state.phase || "-"}`,
     `Open issues: ${state.openIssues.length ? state.openIssues.map((issue) => issue.id).join(", ") : "none"}`,
     `Artifacts: ${relativeTo(state.projectRoot, paths.root)}`,
     `Timeline: ${relativeTo(state.projectRoot, timelineFilePath(paths))}`,

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 — 2026-09-12
+
+- **运行状态带上角色与模型**：运行中 widget 新增一行 `review r2 · bigfish / gpt-5.6-luna · thinking max`（角色 + provider/模型 + 思考强度；provider 取自 `provider/model` 配置前缀），托管运行与外部运行都有；底部状态栏带角色（`dev-review: 3m12s · dev r1` / `dev-review: running review r2`）。
+- **blocked / ready 的 widget** 显示 `dev: deepseek-flash (max) · review: gpt-5.6-luna (max)` 配置行，方便判断是哪个模型/额度出的问题；`dev_review_status` 的模型行带上 thinking，并新增 `Active role` 行。
+- 引擎的 `Development/Review agent: round N started` 通知带上模型与思考强度。
+
 ## 0.7.0 — 2026-09-12
 
 - **总纲 plan 启动前置提醒**：`dev_review_start`（主 agent 工具）识别「多批次总纲 plan」（含 `当前执行批次` 标记）后**不直接启动**，而是返回建议让主 agent 问用户走哪条路——(a) 按当前批次口径直接开始（再次调用时带 `confirm_master_plan=true`），或 (b) 先把这一批的子 plan/范围/做法聊定再启动。用户手输 `/dev-review start` 不受影响（视为已拍板）。
