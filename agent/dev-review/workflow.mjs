@@ -1196,6 +1196,39 @@ async function writeEscalation(state, paths, reason, details) {
   return filePath;
 }
 
+function truncateText(value, max) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/**
+ * Compact human-readable reason for a blocked workflow: reason code, summary,
+ * decision questions with options, and the escalation file. Every place that
+ * reports a stop (CLI result, background-run wake-up message, status) uses this
+ * so callers surface *why* a run stopped instead of a bare "blocked".
+ */
+function blockedNotice(state, { summaryLimit = 700, questionLimit = 3, questionTextLimit = 300, optionLimit = 6, optionTextLimit = 260 } = {}) {
+  const blocked = state?.blocked;
+  if (!blocked) return `Workflow is ${state?.status || "stopped"} with no recorded blocking reason.`;
+  const lines = [`Blocked (${blocked.reason || "human-decision"})`];
+  const summary = truncateText(blocked.details?.summary, summaryLimit);
+  if (summary) lines.push(`Why: ${summary}`);
+  const questions = Array.isArray(blocked.details?.questions) ? blocked.details.questions : [];
+  questions.slice(0, questionLimit).forEach((item, index) => {
+    const question = typeof item === "string" ? item : item?.question;
+    if (!question) return;
+    lines.push(`Q${index + 1}: ${truncateText(question, questionTextLimit)}`);
+    const options = typeof item === "object" && Array.isArray(item?.options) ? item.options : [];
+    options.slice(0, optionLimit).forEach((option, optionIndex) => {
+      lines.push(`  ${optionIndex + 1}) ${truncateText(option, optionTextLimit)}`);
+    });
+  });
+  if (questions.length > questionLimit) lines.push(`…还有 ${questions.length - questionLimit} 个决策问题，见决策文件。`);
+  if (blocked.escalationPath) lines.push(`Decision file: ${blocked.escalationPath}`);
+  return lines.join("\n");
+}
+
 function stateStatus(state, paths) {
   const lines = [
     `Workflow: ${state.workflow?.key || state.workflowId}`,
@@ -1209,7 +1242,11 @@ function stateStatus(state, paths) {
     `Open issues: ${state.openIssues.length ? state.openIssues.map((issue) => issue.id).join(", ") : "none"}`,
     `Artifacts: ${relativeTo(state.projectRoot, paths.root)}`,
   ];
-  if (state.blocked?.escalationPath) lines.push(`Human decision file: ${state.blocked.escalationPath}`);
+  if (state.status === "blocked" && state.blocked) {
+    lines.push(blockedNotice(state));
+  } else if (state.blocked?.escalationPath) {
+    lines.push(`Human decision file: ${state.blocked.escalationPath}`);
+  }
   return lines.join("\n");
 }
 
@@ -1521,7 +1558,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     return {
       state,
       paths,
-      message: `Workflow is blocked pending a human decision (details above). Write a decision document and run /dev-review resolve <file>, then /dev-review run. Escalation file: ${state.blocked?.escalationPath || "not recorded"}.`,
+      message: `Workflow is blocked pending a human decision.\n${blockedNotice(state)}\nWrite a decision document (see the decision file) and run /dev-review resolve <file>, then /dev-review run.`,
     };
   }
   if (state.status === "running") {
@@ -1571,24 +1608,24 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       }
       review = normalizeReviewerReport(extractJsonObject(output.finalText), round, state.openIssues);
     } catch (error) {
-      const escalation = await escalate("reviewer-protocol-or-execution-error", {
+      await escalate("reviewer-protocol-or-execution-error", {
         summary: error.message,
       });
-      return { state, paths, message: `Review requires human attention: ${relativeTo(projectRoot, escalation)}` };
+      return { state, paths, message: `Review requires human attention.\n${blockedNotice(state)}` };
     }
 
     const nextOpenIssues = applyReviewReport(state, review, round);
     if (review.decision === "pass" && nextOpenIssues.length > 0) {
-      const escalation = await escalate("invalid-review-pass", {
+      await escalate("invalid-review-pass", {
         summary: "Reviewer returned pass while unresolved issues remained. This is a protocol violation and needs human inspection.",
       });
-      return { state, paths, message: `Invalid reviewer pass stopped: ${relativeTo(projectRoot, escalation)}` };
+      return { state, paths, message: `Invalid reviewer pass stopped.\n${blockedNotice(state)}` };
     }
     if (review.decision === "fix_required" && nextOpenIssues.length === 0) {
-      const escalation = await escalate("invalid-review-fix-required", {
+      await escalate("invalid-review-fix-required", {
         summary: "Reviewer returned fix_required but did not leave any open issue. This is a protocol violation and needs human inspection.",
       });
-      return { state, paths, message: `Invalid reviewer result stopped: ${relativeTo(projectRoot, escalation)}` };
+      return { state, paths, message: `Invalid reviewer result stopped.\n${blockedNotice(state)}` };
     }
 
     state.openIssues = nextOpenIssues;
@@ -1615,11 +1652,15 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     history.decision = review.decision;
 
     if (review.decision === "spec_blocked") {
-      const escalation = await escalate("reviewer-spec-blocked", {
+      await escalate("reviewer-spec-blocked", {
         summary: review.summary,
         questions: review.spec_questions,
       });
-      return { state, paths, message: `Review requires a product decision: ${relativeTo(projectRoot, escalation)}` };
+      return {
+        state,
+        paths,
+        message: `Review requires a product decision.\n${blockedNotice(state)}\nWrite a decision document and run /dev-review resolve <file>, then /dev-review run.`,
+      };
     }
 
     if (review.decision === "pass") {
@@ -1638,10 +1679,10 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     state.updatedAt = now();
     await writeJson(paths.state, state);
     if (round >= state.config.maxReviewRounds) {
-      const escalation = await escalate("max-rounds", {
+      await escalate("max-rounds", {
         summary: `The reviewer still requested fixes after round ${round}, which is the configured maximum of ${state.config.maxReviewRounds}.`,
       });
-      return { state, paths, message: `Stopped after max rounds: ${relativeTo(projectRoot, escalation)}` };
+      return { state, paths, message: `Stopped after max rounds.\n${blockedNotice(state)}` };
     }
     return null;
   };
@@ -1675,10 +1716,10 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
   }
   if (options.maxRounds) state.config.maxReviewRounds = options.maxRounds;
   if (state.currentRound >= state.config.maxReviewRounds) {
-    const escalation = await escalate("max-rounds", {
+    await escalate("max-rounds", {
       summary: `The configured limit of ${state.config.maxReviewRounds} review rounds was reached before a pass.`,
     });
-    return { state, paths, message: `Stopped for human decision: ${relativeTo(projectRoot, escalation)}` };
+    return { state, paths, message: `Stopped for human decision.\n${blockedNotice(state)}` };
   }
 
   await ensureArtifactDirectories(paths);
@@ -1720,11 +1761,11 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         devSummary && `Developer: ${devSummary}`,
         firstBlocker && `Question: ${firstBlocker}`,
       ].filter(Boolean).join(" — ");
-      const escalation = await escalate("developer-protocol-or-execution-error", {
+      await escalate("developer-protocol-or-execution-error", {
         summary,
         ...(rawReport ? { rawReport: JSON.stringify(rawReport, null, 2) } : {}),
       });
-      return { state, paths, message: `Developer run stopped for human attention: ${relativeTo(projectRoot, escalation)}` };
+      return { state, paths, message: `Developer run stopped for human attention.\n${blockedNotice(state)}` };
     }
 
     const developerJsonPath = path.join(paths.handoffs, `developer-r${String(round).padStart(2, "0")}.json`);
@@ -1760,11 +1801,11 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     state.history.push(history);
 
     if (developer.status === "blocked") {
-      const escalation = await escalate("developer-blocked", {
+      await escalate("developer-blocked", {
         summary: developer.summary,
         questions: developer.blockers,
       });
-      return { state, paths, message: `Development requires a human decision: ${relativeTo(projectRoot, escalation)}` };
+      return { state, paths, message: `Development requires a human decision.\n${blockedNotice(state)}` };
     }
 
     const reviewResult = await runReviewPhase(round, developerMarkdownPath, history);
@@ -1850,6 +1891,7 @@ ${result.message}`,
 
 export {
   DEFAULT_ARTIFACT_DIR,
+  blockedNotice,
   extractJsonObject,
   initializeWorkflow,
   adoptWorkflow,

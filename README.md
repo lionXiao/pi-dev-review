@@ -116,11 +116,12 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 
 ### 3.3 后台运行（不阻塞对话）
 
-`run` / `start` 不阻塞主 agent 的回合：引擎在后台继续跑，编辑器下方有一条实时更新的进度条（运行时长 · 最近引擎事件 · 轮次），底部状态栏同步显示。你可以随时继续聊天，主 agent 也能正常回复。机器停止时（pass / blocked / max-rounds）会有一条总结消息自动唤醒主 agent，直接给出结果与下一步。
+`run` / `start` 不阻塞主 agent 的回合：引擎在后台继续跑，编辑器下方有一条实时更新的进度条（运行时长 · 最近引擎事件 · 轮次），底部状态栏同步显示。你可以随时继续聊天，主 agent 也能正常回复。机器停止时（pass / blocked / max-rounds）会有一条总结消息自动唤醒主 agent，消息里直接带着停止原因：reason 代码、摘要、决策问题与选项（不是只有一句 "blocked"）。
 
 - 进度条：`dev-review ▶ 运行中 3m12s` + 最近一条引擎事件，每秒更新；
-- **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked/passed），不依赖谁启动的；
-- 随时查询：`dev_review_status` 工具或 `/dev-review status`，输出带 `[run]` 行；
+- **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked(reason)/passed），不依赖谁启动的；
+- **事后补报**：如果运行在扩展观察窗口之外结束（bash 拉起未走扩展、或 block 发生在 reload 之前），下一个回合会自动补报一次停止原因，状态栏与 `dev_review_status` 都带 `blocked (reason)`；
+- 随时查询：`dev_review_status` 工具或 `/dev-review status`，blocked 时输出原因、摘要与决策问题/选项，另带 `[run]` 行；
 - 同一时间只允许一个后台运行，重复启动会被拒绝；
 - 新建实例用 `dev_review_start`（工具，plan 哈希变化/新批次必需）；`dev_review_run` 只续跑已有实例，两者都走后台上进；
 - 目前不提供中途取消（引擎无 abort 接口）：要停只能等到停止条件，或 `/dev-review escape` 挂起纪律后手动处理。
@@ -152,7 +153,7 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 1. **TUI 实时流**：子 Agent 每个工具调用/助手消息/失败以事件形式推到主 TUI（dev/reviewer r{N} 前缀）。设 `DEV_REVIEW_STREAM=0` 关闭。
 2. **每轮条目**：`◆ Development` / `◇ Review` / `⚠ Escalation` markdown 条目追加进会话流（Ctrl+O 展开，含完整 handoff）。
 3. **磁盘全量**：`handoffs/`（每轮 JSON+MD）、`reports/`（最终报告）、`private/*-sessions/*.jsonl`（两边的完整过程，可用 `pi --session-dir ... -r` 交互回看）。
-4. **后台运行进度条**：`run` / `start` 后台执行时，编辑器下方显示实时进度（运行时长 + 最近引擎事件），主 agent 回合不被占用；停止时注入总结消息。CLI/bash 直接拉起的「外部启动」由轮询跟踪，同样有进度与停止唤醒。
+4. **后台运行进度条**：`run` / `start` 后台执行时，编辑器下方显示实时进度（运行时长 + 最近引擎事件），主 agent 回合不被占用；停止时注入总结消息（含 reason / 摘要 / 决策问题与选项）。CLI/bash 直接拉起的「外部启动」由轮询跟踪，同样有进度与停止唤醒；在观察窗口之外结束的运行会在下一回合补报一次原因。
 
 ## 6. 版本 v2 相对原包的改进清单
 

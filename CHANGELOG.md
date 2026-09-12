@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 — 2026-09-12
+
+- **blocked 不再只说 "blocked"**：引擎的停止返回值（`run` / `start` / 后台唤醒消息 / CLI）统一携带阻塞详情 —— reason 代码、摘要、决策问题与选项（`blockedNotice`）。主 agent 被唤醒时即可向用户解释为什么停、要决定什么，不用再先跑一轮 `dev_review_status`。
+- **事后补报**：运行在扩展观察窗口之外结束（bash/CLI 拉起、或 block 发生在 reload 之前）时，下一个回合 `syncRunStatus` 会补发一次停止原因（每会话每状态一次），不再只把状态栏画成 `blocked`。
+- **状态可读性**：底部状态栏显示 `blocked (reason)`；`/dev-review status` / `dev_review_status` 在 blocked 时输出原因、摘要与决策问题/选项；外部轮询的停止唤醒消息同样带原因与决策问题。
+- **修复 policy 标记重复**：`policy.md` 文件自带一份 `<!-- dev-review-policy -->`，与 `renderPolicy` 添加的标记重复，system prompt 中出现两次；现只由渲染函数添加（单测锁定）。
+- 新增 `blockedNotice` 单测与 `readWorkflowState.blocked.questions` 覆盖。
+
 ## 0.4.0 — 2026-09-12
 
 - **通用工作协议（始终注入）**：新增 `policy.md`（改动分级 / 提问线 / 不拿流程当挡箭牌），由扩展在任何项目、任何状态注入；工作流纪律仍只在活跃期注入。项目 `CLAUDE.md` 从此**零配置**（可直接清空旧的纪律段落）。

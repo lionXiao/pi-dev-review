@@ -1,4 +1,3 @@
-<!-- dev-review-policy -->
 # 通用工作协议（始终生效）
 
 > 由 dev-review-loop 扩展自动注入，项目无需任何配置；可用 `~/.pi/agent/dev-review/local.json` 的 `injectWorkingAgreement: false` 关闭。

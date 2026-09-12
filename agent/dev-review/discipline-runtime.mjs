@@ -100,6 +100,27 @@ export async function readWorkflowState(projectRoot) {
     const artifactDir = join(projectRoot, pointer.artifactDir);
     const state = JSON.parse(await readFile(join(artifactDir, "state.json"), "utf8"));
     const issue = Array.isArray(state.openIssues) && state.openIssues.length ? state.openIssues[0] : null;
+    const blocked = state.blocked && typeof state.blocked === "object"
+      ? {
+          reason: typeof state.blocked.reason === "string" ? state.blocked.reason : null,
+          summary: typeof state.blocked.details?.summary === "string" ? state.blocked.details.summary : "",
+          escalationPath: typeof state.blocked.escalationPath === "string" ? state.blocked.escalationPath : null,
+          questions: Array.isArray(state.blocked.details?.questions)
+            ? state.blocked.details.questions
+                .map((item) => (
+                  typeof item === "string"
+                    ? { question: item, options: [] }
+                    : {
+                        question: typeof item?.question === "string" ? item.question : "",
+                        options: Array.isArray(item?.options)
+                          ? item.options.filter((option) => typeof option === "string")
+                          : [],
+                      }
+                ))
+                .filter((item) => item.question)
+            : [],
+        }
+      : null;
     return {
       found: true,
       projectRoot,
@@ -113,6 +134,7 @@ export async function readWorkflowState(projectRoot) {
       openIssue: issue
         ? { id: issue.id, severity: issue.severity, requirement: issue.requirement || "" }
         : null,
+      blocked,
     };
   } catch {
     return { found: false };

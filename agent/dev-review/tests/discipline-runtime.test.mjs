@@ -32,6 +32,17 @@ function stateFixture(status = "blocked") {
     currentRound: 3,
     config: { maxReviewRounds: 10 },
     openIssues: [{ id: "R1-001", severity: "major", requirement: "举例" }],
+    blocked: {
+      reason: "reviewer-spec-blocked",
+      details: {
+        summary: "卡在人工验收",
+        questions: [
+          { question: "谁做 L1 验收？", why: "计划要求", options: ["用户", "developer", "coordinator"] },
+          "纯字符串问题",
+        ],
+      },
+      escalationPath: ".ai-dev-review/demo--abc12345/escalation/01-reviewer-spec-blocked.md",
+    },
   };
 }
 
@@ -63,6 +74,13 @@ test("readWorkflowState: reads pointer + state, degrades gracefully", async () =
   assert.equal(wf.status, "blocked");
   assert.equal(wf.currentRound, 3);
   assert.equal(wf.openIssue.id, "R1-001");
+  assert.equal(wf.blocked.reason, "reviewer-spec-blocked");
+  assert.equal(wf.blocked.summary, "卡在人工验收");
+  assert.equal(wf.blocked.escalationPath, ".ai-dev-review/demo--abc12345/escalation/01-reviewer-spec-blocked.md");
+  assert.deepEqual(wf.blocked.questions, [
+    { question: "谁做 L1 验收？", options: ["用户", "developer", "coordinator"] },
+    { question: "纯字符串问题", options: [] },
+  ]);
 
   assert.deepEqual(await readWorkflowState(null), { found: false });
   assert.deepEqual(await readWorkflowState(join(root, "nope")), { found: false });
@@ -117,6 +135,10 @@ test("policy: always-on working agreement loads with its own marker", async () =
   assert.ok(rendered.startsWith("<!-- dev-review-policy -->"));
   assert.ok(rendered.includes("改动分级"));
   assert.ok(rendered.includes("提问线"));
+  // The marker is added by renderPolicy; the source file must not carry its own
+  // copy (it would be duplicated in the system prompt).
+  assert.equal(rendered.split("<!-- dev-review-policy -->").length - 1, 1);
+  assert.ok(!text.includes("<!-- dev-review-policy -->"));
 });
 
 test("config: working-agreement injection defaults on", async () => {

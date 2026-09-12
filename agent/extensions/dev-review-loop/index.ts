@@ -90,6 +90,21 @@ export default function (pi: any) {
     return container;
   });
 
+  // One-shot workflow notices: discipline state changes and stopped-run
+  // reasons. Blocked notices are rendered in the TUI (display: true) so the
+  // user also sees *why*; the LLM sees the same content either way.
+  pi.registerMessageRenderer("dev-review-notice", (message: any, { expanded }: any, theme: any) => {
+    const content = String(message?.content || "");
+    const lines = content.split("\n");
+    const head = theme.fg("warning", "⚠ dev-review");
+    if (expanded || lines.length <= 6) return new Text(`${head}\n${content}`, 0, 0);
+    return new Text(
+      `${head}\n${lines.slice(0, 6).join("\n")}\n${theme.fg("dim", `… 还有 ${lines.length - 6} 行（Ctrl+O 展开）`)}`,
+      0,
+      0,
+    );
+  });
+
   // ---- Main-agent discipline (single source: dev-review/discipline.md) ----
   // Routing is code, not prompt: tail appends carry state changes, system-prompt
   // checkpoints happen only at free moments (session start / compaction / tree)
@@ -124,7 +139,7 @@ export default function (pi: any) {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (!disciplineState.baselineText) await checkpointDiscipline(ctx);
     const s = await readDisciplineContext(ctx);
-    syncRunStatus(ctx, s.workflow);
+    const runNotice = syncRunStatus(ctx, s.workflow);
     const { text, version } = await loadDiscipline();
     const route = routeDiscipline({
       event: "user_turn",
@@ -140,13 +155,21 @@ export default function (pi: any) {
     if (disciplineState.baselineText) {
       out.systemPrompt = `${event.systemPrompt}\n\n${disciplineState.baselineText}`;
     }
+    const notices: string[] = [];
     if (route.action === "append") {
-      const content = route.kind === "active"
+      notices.push(route.kind === "active"
         ? renderDiscipline(text, s.workflow)
         : route.kind === "suspended"
           ? renderSuspended(s.override)
-          : renderLifted();
-      out.message = { customType: "dev-review-discipline", content, display: false };
+          : renderLifted());
+    }
+    if (runNotice) notices.push(runNotice);
+    if (notices.length) {
+      out.message = {
+        customType: "dev-review-notice",
+        content: notices.join("\n\n"),
+        display: Boolean(runNotice),
+      };
     }
     return out.message || out.systemPrompt ? out : undefined;
   });
@@ -270,6 +293,9 @@ export default function (pi: any) {
   const EXTERNAL_POLL_MS = Number(process.env.DEV_REVIEW_POLL_MS || 10000);
   let backgroundRun: { startedAt: number; lastMessage: string; timer: ReturnType<typeof setInterval> | null } | null = null;
   let externalRun: { timer: ReturnType<typeof setInterval>; startedAt: number } | null = null;
+  // Last terminal state (blocked/passed) this session has already told the main
+  // agent about; prevents repeating the wake-up message on every user turn.
+  let surfacedStateKey: string | null = null;
 
   const agoLabel = (iso: string | undefined) => {
     const at = iso ? Date.parse(iso) : NaN;
@@ -280,10 +306,43 @@ export default function (pi: any) {
 
   const summarizeRunStatus = (message: string) => {
     const text = String(message || "");
+    const blocked = text.match(/Blocked \(([^)]+)\)/);
+    if (blocked) return `blocked (${blocked[1]})`;
     if (/passed|pass(ed)? after/i.test(text)) return "passed";
     if (/human decision|blocked/i.test(text)) return "blocked";
     if (/max rounds/i.test(text)) return "max-rounds";
     return "stopped";
+  };
+
+  const terminalStateKey = (
+    status: string,
+    key: string | null | undefined,
+    updatedAt: string | null | undefined,
+  ) => {
+    if (status === "blocked") return `blocked:${key || "?"}:${updatedAt || "?"}`;
+    if (status === "passed" || status === "abandoned") return `${status}:${key || "?"}:${updatedAt || "?"}`;
+    return null;
+  };
+
+  // Wake-up text for a stopped run: reason code + engine summary + decision
+  // questions/options, so the main agent can explain *why* it blocked and what
+  // the human must choose without another round-trip.
+  const stopNoticeText = (workflow: any, label: string, origin = "") => {
+    const reason = workflow?.blocked?.reason;
+    const reasonPart = reason && !label.includes(reason) ? `（${reason}）` : "";
+    const summary = String(workflow?.blocked?.summary || "").replace(/\s+/g, " ").trim();
+    const lines = [`[dev-review] 工作流已停止${origin}：${label}${reasonPart}。`];
+    if (summary) lines.push(`为什么停：${summary.slice(0, 600)}`);
+    const questions = Array.isArray(workflow?.blocked?.questions) ? workflow.blocked.questions : [];
+    questions.slice(0, 2).forEach((item: any, index: number) => {
+      lines.push(`待决定 Q${index + 1}：${String(item?.question || "").replace(/\s+/g, " ").slice(0, 220)}`);
+      (Array.isArray(item?.options) ? item.options : []).slice(0, 4).forEach((option: string, optionIndex: number) => {
+        lines.push(`  ${optionIndex + 1}) ${String(option).replace(/\s+/g, " ").slice(0, 200)}`);
+      });
+    });
+    if (questions.length > 2) lines.push(`（还有 ${questions.length - 2} 个决策问题，见 dev_review_status 或决策文件）`);
+    lines.push("请把阻塞原因、需要用户决定什么转述给用户，并说明下一步。");
+    return lines.join("\n");
   };
 
   const renderRunWidget = (ctx: any) => {
@@ -347,21 +406,18 @@ export default function (pi: any) {
         renderExternalWidget(ctx, fresh);
         return;
       }
-      const label = !fresh.found
-        ? "stopped"
-        : String(fresh.status) === "blocked"
-          ? `blocked${fresh.openIssue ? ` (${fresh.openIssue.id})` : ""}`
-          : String(fresh.status);
+      const status = fresh.found ? String(fresh.status || "") : "stopped";
+      const label = status === "blocked"
+        ? `blocked${fresh.blocked?.reason ? ` (${fresh.blocked.reason})` : ""}`
+        : status;
       stopExternalWatch(ctx);
       try {
         ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${label}`);
       } catch {}
+      surfacedStateKey = terminalStateKey(status, fresh.key, fresh.updatedAt) ?? surfacedStateKey;
       workflowNotify(`dev-review 引擎已停止：${label}`);
       try {
-        pi.sendUserMessage(
-          `[dev-review] 后台引擎已停止（外部启动，轮询检测）：${label}。请用 dev_review_status 查看详情并向用户汇报。`,
-          { deliverAs: "followUp" },
-        );
+        pi.sendUserMessage(stopNoticeText(fresh, label, "（外部启动，轮询检测）"), { deliverAs: "followUp" });
       } catch {}
     };
     externalRun = { timer: setInterval(() => void tick(), EXTERNAL_POLL_MS), startedAt: Date.now() };
@@ -370,39 +426,54 @@ export default function (pi: any) {
 
   // Called on every turn: the footer/widget always reflect the real state on
   // disk, whoever started the run. Managed runs keep their own widget.
-  const syncRunStatus = (ctx: any, workflow: any) => {
-    if (backgroundRun) return;
+  // Returns a one-shot notice when a run stopped outside this session's watch
+  // (bash/CLI start, or finished before a reload) so the main agent still learns
+  // the reason instead of only seeing a status-bar label.
+  const syncRunStatus = (ctx: any, workflow: any): string | null => {
+    if (backgroundRun) return null;
     const status = workflow?.found ? String(workflow.status || "") : "";
     if (status === "running") {
       ensureExternalWatch(ctx, workflow);
       renderExternalWidget(ctx, workflow);
-      return;
+      return null;
     }
     if (externalRun) stopExternalWatch(ctx);
+    const label =
+      status === "blocked"
+        ? `blocked${workflow.blocked?.reason ? ` (${workflow.blocked.reason})` : ""}`
+        : status === "passed" || status === "ready" || status === "abandoned"
+          ? status
+          : undefined;
     try {
-      const label =
-        status === "blocked"
-          ? `blocked${workflow.openIssue ? ` (${workflow.openIssue.id})` : ""}`
-          : status === "passed" || status === "ready" || status === "abandoned"
-            ? status
-            : undefined;
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, label ? `dev-review: ${label}` : undefined);
     } catch {}
     try {
       ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
     } catch {}
+
+    const key = terminalStateKey(status, workflow?.key, workflow?.updatedAt);
+    if (!key || key === surfacedStateKey) return null;
+    surfacedStateKey = key;
+    return stopNoticeText(workflow, label || status);
   };
 
   const finishBackgroundRun = (ctx: any, result: { ok?: boolean; message?: string }) => {
     const message = result?.message || "dev-review 运行结束（无消息）";
     if (backgroundRun?.timer) clearInterval(backgroundRun.timer);
     backgroundRun = null;
+    // The completion message below already carries the reason; mark this state
+    // as surfaced so the next turn does not repeat it via syncRunStatus.
+    const finalState = (result as any)?.state;
+    if (finalState?.status) {
+      surfacedStateKey =
+        terminalStateKey(String(finalState.status), finalState.workflow?.key, finalState.updatedAt) ?? surfacedStateKey;
+    }
     renderRunWidget(ctx);
     try {
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${summarizeRunStatus(message)}`);
     } catch {}
     workflowNotify(message);
-    const text = `[dev-review] 后台运行结束：${message}\n请用 dev_review_status 查看详情，并向用户汇报下一步（若是 blocked，说明需要用户决定什么）。`;
+    const text = `[dev-review] 后台运行结束：${message}\n请把阻塞原因、需要用户决定什么转述给用户（完整决策问题与选项见 dev_review_status 或决策文件），并说明下一步。`;
     try {
       if (ctx?.isIdle?.() === false) pi.sendUserMessage(text, { deliverAs: "followUp" });
       else pi.sendUserMessage(text);
