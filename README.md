@@ -78,6 +78,7 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 
 - `--test` 可多次（每轮 dev/reviewer 都要跑）
 - 工作树有"故意要被评审的代码"时加 `--allow-dirty`（仅 start 检查，run 不检查）
+- **多批次总纲 plan**（一份文件多个批次、已验证部分批次）：引擎**不会拆分文件**，dev/reviewer 按文件里的「当前执行批次」标记执行；每次改 plan 内容 → 新 hash → 新实例。主 agent 用 `dev_review_start` 启动这类 plan 时会先返回提醒，让你选 (a) 按当前批次口径直接开始（`confirm_master_plan=true`），还是 (b) 先把这一批的子 plan/范围/做法聊定再启动；你手输 `/dev-review start` 则视为已拍板、直接开始。
 - 模型可写在 `local.json`，start 时不用传
 
 ### 3.2 blocked 时的三种回应方式（任选，效果等价）

@@ -18,6 +18,16 @@ Use the agreed parts of the current conversation and the repository as context. 
 
 Mark the document as **Draft**. After writing it, present a concise summary plus every unresolved question. Stop and ask the user to review or amend it. Do not claim it is frozen until the user explicitly confirms it.
 
+## Multi-batch master plans
+
+If the plan is a master document covering several batches (it carries a current-batch marker such as `当前执行批次` and a batch table where some rows are already done):
+
+- The engine **never splits the file**. `/dev-review start` freezes the whole document and the roles implement the batch named by the marker; each batch becomes a new workflow instance because editing the plan changes its content hash.
+- Before suggesting `start`, read the marker and confirm with the user which way to go:
+  1. **直接开始** — start now with the batch exactly as written (the dev agent works from the frozen copy; no sub-plan file is produced);
+  2. **先聊子 plan** — first pin down this batch's scope, approach, acceptance criteria and any amendments in conversation, update the plan file, then start.
+- Present both options and proceed with whichever the user picks. Do not force a sub-plan when the user wants to start directly.
+
 When the user later explicitly confirms the draft, update its status to **Confirmed / Frozen**, preserve the accepted details in the plan file, and tell the user to start the loop with one command:
 
 ```text

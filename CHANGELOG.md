@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 — 2026-09-12
+
+- **总纲 plan 启动前置提醒**：`dev_review_start`（主 agent 工具）识别「多批次总纲 plan」（含 `当前执行批次` 标记）后**不直接启动**，而是返回建议让主 agent 问用户走哪条路——(a) 按当前批次口径直接开始（再次调用时带 `confirm_master_plan=true`），或 (b) 先把这一批的子 plan/范围/做法聊定再启动。用户手输 `/dev-review start` 不受影响（视为已拍板）。
+- 引擎 `init/start` 的结果消息也附同样提示（含识别到的当前批次），CLI 同样可见；`/dev-review-plan` 提示词模板新增多批次总纲一节。
+- 新增 `detectMasterPlan` 单测（30 用例）。
+
 ## 0.6.1 — 2026-09-12
 
 - **`start`/`init` 的 plan 路径兜底**：cwd 相对路径找不到、但同一路径相对仓库根存在时，自动按仓库根解析并在结果里注明；错误信息同时列出两个解析结果。真实事故：会话 cwd 是 `<repo>/docs/prd`，却传了仓库根相对路径 `docs/prd/v1.2-refactor-plan.md`，拼成双层目录直接失败（批 3 启动失败但主 agent 会误汇报成旧实例）。

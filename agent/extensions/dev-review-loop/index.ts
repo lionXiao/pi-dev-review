@@ -1,12 +1,12 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createHmac } from "node:crypto";
 import { Type } from "typebox";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { runCommand } from "../../dev-review/workflow.mjs";
+import { runCommand, detectMasterPlan } from "../../dev-review/workflow.mjs";
 import {
   DISCIPLINE_MARKER,
   POLICY_MARKER,
@@ -59,6 +59,15 @@ function reportTitle(report: WorkflowReport) {
     return `Escalation · ${report.status} · needs human decision`;
   }
   return `${report.role === "developer" ? "Development" : "Review"} · round ${report.round} · ${report.status}`;
+}
+
+/** Resolve a plan path for the master-plan preflight (cwd first, then project root). */
+function resolvePlanPathForCheck(cwd: string, plan: string) {
+  const fromCwd = resolve(cwd || process.cwd(), plan);
+  if (existsSync(fromCwd)) return fromCwd;
+  const root = findProjectRoot(cwd || process.cwd());
+  const fromRoot = root ? resolve(root, plan) : fromCwd;
+  return existsSync(fromRoot) ? fromRoot : fromCwd;
 }
 
 export default function (pi: any) {
@@ -665,14 +674,43 @@ export default function (pi: any) {
       "Instances are keyed by plan content hash + label: use this when no instance exists for the current plan " +
       "(first batch, or the plan file was amended so its hash changed), or when you need a separate instance per " +
       "batch via label. dev_review_run only resumes an existing instance. Progress widget + completion summary " +
-      "are the same as dev_review_run.",
+      "are the same as dev_review_run. " +
+      "IMPORTANT for multi-batch master plans: if the plan contains a current-batch marker (e.g. `当前执行批次`), " +
+      "this tool first returns an advisory instead of starting. Ask the user which they want — (a) start the written " +
+      "batch now as-is, or (b) settle this batch's scope/approach in conversation first (amend the plan, then start). " +
+      "If the user picks (a), call again with confirm_master_plan=true.",
     parameters: Type.Object({
       plan: Type.String({ description: "Path to the plan file, e.g. docs/prd/v1.2-refactor-plan.md" }),
       test: Type.Optional(Type.String({ description: "Test command recorded in the workflow (combined string; quote inside is fine)" })),
       max_rounds: Type.Optional(Type.Number({ description: "Override max review rounds" })),
       label: Type.Optional(Type.String({ description: "Workflow label; use a distinct label per batch sharing the same plan file" })),
+      confirm_master_plan: Type.Optional(Type.Boolean({ description: "Set true only after the user chose to start a multi-batch master plan as-is" })),
     }),
     async execute(toolCallId: any, params: any, signal: any, onUpdate: any, ctx: any) {
+      const cwd = ctx?.cwd || process.cwd();
+      // Preflight: a master plan (one file, several batches, some done) must not
+      // silently kick off. Ask the user first; confirm_master_plan=true skips this.
+      if (!params.confirm_master_plan) {
+        try {
+          const planPath = resolvePlanPathForCheck(cwd, String(params.plan || ""));
+          const master = detectMasterPlan(await readFile(planPath, "utf8"));
+          if (master) {
+            const batch = master.currentBatch ? `当前标记的批次：\`${master.currentBatch}\`。` : "未找到明确的「当前执行批次」标记。";
+            return {
+              content: [{
+                type: "text",
+                text:
+                  `检测到这是多批次总纲 plan（${batch}）——引擎不会拆分它，dev/reviewer 会按冻结副本里的当前批次执行。\n` +
+                  "请先问用户怎么走：(a) 直接开始（按当前批次口径，立即启动），或 (b) 先把这一批的子 plan/范围/做法聊定（必要时修订 plan），再启动。\n" +
+                  "用户选 (a) 时，用 confirm_master_plan=true 再调用一次本工具。",
+              }],
+              details: { masterPlan: master },
+            };
+          }
+        } catch {
+          // Plan unreadable here is not fatal; the engine will report it precisely.
+        }
+      }
       const args = ["start", params.plan];
       if (params.test) args.push("--test", JSON.stringify(String(params.test)));
       if (params.max_rounds) args.push("--max-rounds", String(params.max_rounds));

@@ -1389,11 +1389,36 @@ function resolvePlanSource(cwd, planArg, projectRoot) {
   throw new Error(`Plan file does not exist: ${fromCwd} (resolved from cwd ${cwd}${tried})`);
 }
 
+/**
+ * Detect a multi-batch "master plan" (one file holding several batches, some
+ * already completed). The engine never splits a plan: it freezes the file and
+ * the roles work from the current-batch marker. Starting one is legitimate, but
+ * worth a soft advisory so the user can decide between "start this batch as-is"
+ * and "settle the batch scope in conversation first".
+ */
+function detectMasterPlan(planText) {
+  const text = String(planText || "");
+  const marker = text.match(/(?:当前执行批次|current batch)\**\s*[:：]\s*`([^`\n]+)`/i);
+  if (marker) return { currentBatch: marker[1].trim(), explicitMarker: true };
+  const batchMentions = (text.match(/(?:^|\s)批\s*\d/g) || []).length;
+  if (batchMentions >= 3 && /(总纲|批次)/.test(text)) return { currentBatch: null, explicitMarker: false };
+  return null;
+}
+
 async function initializeWorkflow(cwd, positionals, options) {
   if (positionals.length !== 1) throw new Error("init requires exactly one plan path");
   const projectRoot = gitRoot(cwd);
   const { planSource, note: planPathNote } = resolvePlanSource(cwd, positionals[0], projectRoot);
   const planContents = await readFile(planSource);
+  const masterPlan = detectMasterPlan(planContents.toString("utf8"));
+  const masterPlanNote = masterPlan
+    ? [
+        "",
+        `Note: this looks like a multi-batch master plan${masterPlan.currentBatch ? ` (current batch: ${masterPlan.currentBatch})` : ""}.`,
+        "The engine does not split the file; the developer/reviewer work from this frozen copy as written.",
+        "If this batch's scope/approach is not settled with the user yet, confirm it first (start as-is, or agree on the batch plan in conversation and amend the plan) — or proceed if the user already chose.",
+      ].join("\n")
+    : "";
   const dirty = gitStatus(projectRoot);
   if (dirty && !options.allowDirty) {
     throw new Error("Worktree is dirty. Commit/stash first, or intentionally use --allow-dirty to review the existing diff.");
@@ -1451,7 +1476,7 @@ async function initializeWorkflow(cwd, positionals, options) {
   return {
     state,
     paths,
-    message: `Initialized workflow ${key}. Run /dev-review run. Artifacts: ${relativeTo(projectRoot, paths.root)} (timeline: ${relativeTo(projectRoot, timelineFilePath(paths))})${planPathNote ? `\nNote: ${planPathNote}` : ""}`,
+    message: `Initialized workflow ${key}. Run /dev-review run. Artifacts: ${relativeTo(projectRoot, paths.root)} (timeline: ${relativeTo(projectRoot, timelineFilePath(paths))})${planPathNote ? `\nNote: ${planPathNote}` : ""}${masterPlanNote}`,
   };
 }
 
@@ -2045,6 +2070,7 @@ export {
   DEFAULT_ARTIFACT_DIR,
   blockedNotice,
   classifyAgentFailure,
+  detectMasterPlan,
   extractJsonObject,
   initializeWorkflow,
   adoptWorkflow,

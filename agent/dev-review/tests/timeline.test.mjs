@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runCommand, timelineFilePath, timelineLine, classifyAgentFailure, localNow, localTimezoneLabel } from "../workflow.mjs";
+import { runCommand, timelineFilePath, timelineLine, classifyAgentFailure, localNow, localTimezoneLabel, detectMasterPlan } from "../workflow.mjs";
 
 test("timelineLine: one chronological line with round, event, status, summary, artifact", () => {
   const line = timelineLine({
@@ -38,6 +38,21 @@ test("classifyAgentFailure: names quota/auth/network/timeout, else null", () => 
   assert.match(classifyAgentFailure("fetch failed: ECONNRESET"), /network/);
   assert.match(classifyAgentFailure("request timed out after 60s"), /timeout/);
   assert.equal(classifyAgentFailure("reviewer.decision must be one of pass|fix_required"), null);
+});
+
+test("detectMasterPlan: finds the current-batch marker, else falls back to heuristics", () => {
+  const master = "# 总纲\n\n**当前执行批次**：`批 3 — RunwayModel 拆分`（批 2 已提交）\n\n|批|范围|\n|0|基线|\n|1|输入|\n|2|Store|\n|3|Model|";
+  assert.deepEqual(detectMasterPlan(master), { currentBatch: "批 3 — RunwayModel 拆分", explicitMarker: true });
+
+  const english = "# Master plan\n\nCurrent batch: `batch 2 - store split`\n";
+  assert.equal(detectMasterPlan(english).currentBatch, "batch 2 - store split");
+
+  // No marker, but clearly multi-batch.
+  const unmarked = "# 总纲\n批 0 基线\n批 1 输入\n批 2 Store\n批 3 Model\n";
+  assert.deepEqual(detectMasterPlan(unmarked), { currentBatch: null, explicitMarker: false });
+
+  assert.equal(detectMasterPlan("# 单批次计划\n\n只做一件事。"), null);
+  assert.equal(detectMasterPlan(""), null);
 });
 
 test("timelineFilePath: reports/timeline.md under the workflow artifacts", () => {
