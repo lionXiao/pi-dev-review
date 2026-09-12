@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 — 2026-09-12
+
+- **子 agent token 使用追踪**：引擎从子进程 `--mode json` 事件流统计每个 dev/review 轮的 token（↑input ↓output · RcacheRead / WcacheWrite · think）与性能（流式 tok/s、请求平均 TTFT）；缓存命中率公式与 pi 主状态栏一致：`cacheRead / (input + cacheRead + cacheWrite)`。
+- 增量写 `reports/usage.json`（每 role+round 一条，含引擎预格式化的 `line`）；同时通过新的 `onStats` 回调实时喂给扩展。
+- 展示：运行 widget 增加一行 usage（托管/外部运行都显示）；timeline 的 dev/review 行尾附 usage；`/dev-review status` 与 `dev_review_status` 输出 `Usage dev/review rN: …`。
+- 已知限制（属正常现象）：provider 只在请求完成时上报 usage 的话，数字到 `message_end` 才出现；TTFT 从 pi 的 `message_start` 起算，不含建连时间；部分网关无价格表导致 `cost` 为 0，故只显示 token 不显示金额。
+- 新增 usage 单测 + 假 pi 端到端测试（33 用例）。
+
 ## 0.8.0 — 2026-09-12
 
 - **运行状态带上角色与模型**：运行中 widget 新增一行 `review r2 · bigfish / gpt-5.6-luna · thinking max`（角色 + provider/模型 + 思考强度；provider 取自 `provider/model` 配置前缀），托管运行与外部运行都有；底部状态栏带角色（`dev-review: 3m12s · dev r1` / `dev-review: running review r2`）。

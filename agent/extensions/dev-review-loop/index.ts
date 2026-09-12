@@ -148,7 +148,7 @@ export default function (pi: any) {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     if (!disciplineState.baselineText) await checkpointDiscipline(ctx);
     const s = await readDisciplineContext(ctx);
-    const runNotice = syncRunStatus(ctx, s.workflow);
+    const runNotice = await syncRunStatus(ctx, s.workflow);
     const { text, version } = await loadDiscipline();
     const route = routeDiscipline({
       event: "user_turn",
@@ -300,7 +300,7 @@ export default function (pi: any) {
   const RUN_STATUS_KEY = "dev-review-run";
   const RUN_WIDGET_KEY = "dev-review-run";
   const EXTERNAL_POLL_MS = Number(process.env.DEV_REVIEW_POLL_MS || 10000);
-  let backgroundRun: { startedAt: number; lastMessage: string; timelinePath?: string; roleLine?: string; timer: ReturnType<typeof setInterval> | null } | null = null;
+  let backgroundRun: { startedAt: number; lastMessage: string; timelinePath?: string; roleLine?: string; usageLine?: string; timer: ReturnType<typeof setInterval> | null } | null = null;
   let externalRun: { timer: ReturnType<typeof setInterval>; startedAt: number } | null = null;
   // Last terminal state (blocked/passed) this session has already told the main
   // agent about; prevents repeating the wake-up message on every user turn.
@@ -311,6 +311,20 @@ export default function (pi: any) {
     if (!Number.isFinite(at)) return "未知";
     const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
     return seconds < 60 ? `${seconds}s 前` : `${Math.floor(seconds / 60)}m 前`;
+  };
+
+  /** Latest token-usage line written by the engine (reports/usage.json). */
+  const readUsageLine = async (artifactDir: string | null | undefined) => {
+    if (!artifactDir) return null;
+    try {
+      const raw = JSON.parse(await readFile(join(artifactDir, "reports", "usage.json"), "utf8"));
+      const entries = Array.isArray(raw?.entries)
+        ? raw.entries.filter((entry: any) => entry && typeof entry.line === "string")
+        : [];
+      return entries.length ? entries[entries.length - 1].line : null;
+    } catch {
+      return null;
+    }
   };
 
   const summarizeRunStatus = (message: string) => {
@@ -403,6 +417,7 @@ export default function (pi: any) {
       const clock = `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
       const lines = [`dev-review ▶ 运行中 ${clock}`];
       if (backgroundRun.roleLine) lines.push(backgroundRun.roleLine);
+      if (backgroundRun.usageLine) lines.push(backgroundRun.usageLine);
       lines.push(backgroundRun.lastMessage ? `最近：${backgroundRun.lastMessage}` : "启动中…");
       lines.push(
         backgroundRun.timelinePath ? `日志：${backgroundRun.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
@@ -447,12 +462,13 @@ export default function (pi: any) {
     } catch {}
   };
 
-  const renderExternalWidget = (ctx: any, workflow: any) => {
+  const renderExternalWidget = (ctx: any, workflow: any, usageLine: string | null = null) => {
     try {
       const round = `${workflow?.currentRound ?? "?"}/${workflow?.maxRounds ?? "?"}`;
       const lines = [`dev-review ▶ 运行中 · r${round}（外部启动）`];
       const roleLine = roleLineFor(workflow);
       if (roleLine) lines.push(roleLine);
+      if (usageLine) lines.push(usageLine);
       lines.push(`最近引擎更新：${agoLabel(workflow?.updatedAt)}`);
       lines.push(
         workflow?.timelinePath ? `日志：${workflow.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
@@ -473,7 +489,7 @@ export default function (pi: any) {
       const root = findProjectRoot(ctx?.cwd || process.cwd());
       const fresh = await readWorkflowState(root);
       if (fresh.found && String(fresh.status) === "running") {
-        renderExternalWidget(ctx, fresh);
+        renderExternalWidget(ctx, fresh, await readUsageLine(fresh.artifactDir));
         return;
       }
       const status = fresh.found ? String(fresh.status || "") : "stopped";
@@ -499,12 +515,12 @@ export default function (pi: any) {
   // Returns a one-shot notice when a run stopped outside this session's watch
   // (bash/CLI start, or finished before a reload) so the main agent still learns
   // the reason instead of only seeing a status-bar label.
-  const syncRunStatus = (ctx: any, workflow: any): string | null => {
+  const syncRunStatus = async (ctx: any, workflow: any): Promise<string | null> => {
     if (backgroundRun) return null;
     const status = workflow?.found ? String(workflow.status || "") : "";
     if (status === "running") {
       ensureExternalWatch(ctx, workflow);
-      renderExternalWidget(ctx, workflow);
+      renderExternalWidget(ctx, workflow, await readUsageLine(workflow.artifactDir));
       return null;
     }
     if (externalRun) stopExternalWatch(ctx);
@@ -527,6 +543,8 @@ export default function (pi: any) {
         const configLine = configLineFor(workflow);
         if (status === "ready" && roleLine) lines.push(roleLine);
         else if (configLine) lines.push(configLine);
+        const usageLine = await readUsageLine(workflow.artifactDir);
+        if (usageLine) lines.push(usageLine);
         lines.push(`日志：${workflow.timelinePath}`);
         ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, lines, { placement: "belowEditor" });
       } else {
@@ -592,6 +610,11 @@ export default function (pi: any) {
       cwd: ctx?.cwd || process.cwd(),
       piInvocation: currentPiInvocation(),
       notify: update,
+      onStats: (stats: any) => {
+        if (!backgroundRun || !stats?.line) return;
+        backgroundRun.usageLine = String(stats.line);
+        renderRunWidget(ctx);
+      },
       onReport: async (report: WorkflowReport) => {
         try {
           pi.appendEntry<WorkflowReport>("dev-review-report", report);

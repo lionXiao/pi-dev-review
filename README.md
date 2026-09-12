@@ -119,7 +119,8 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 
 `run` / `start` 不阻塞主 agent 的回合：引擎在后台继续跑，编辑器下方有一条实时更新的进度条（运行时长 · 最近引擎事件 · 轮次），底部状态栏同步显示。你可以随时继续聊天，主 agent 也能正常回复。机器停止时（pass / blocked / max-rounds）会有一条总结消息自动唤醒主 agent，消息里直接带着停止原因：reason 代码、摘要、决策问题与选项（不是只有一句 "blocked"）。
 
-- 进度条：`dev-review ▶ 运行中 3m12s` + 当前角色与模型行（如 `review r2 · bigfish / gpt-5.6-luna · thinking max`）+ 最近一条引擎事件 + 时间线路径，每秒更新；底部状态栏同步显示角色；
+- 进度条：`dev-review ▶ 运行中 3m12s` + 当前角色与模型行（如 `review r2 · bigfish / gpt-5.6-luna · thinking max`）+ token 使用行（`tokens ↑11.3k ↓4.8k · R246.1k (CH 99.6%) · 61.2 tok/s · TTFT 1.83s · think 2.6k`）+ 最近一条引擎事件 + 时间线路径，每秒更新；底部状态栏同步显示角色；
+- token 统计：引擎按 role+round 写 `reports/usage.json`，`/dev-review status` / `dev_review_status` 输出 `Usage dev/review rN:` 行，timeline 的 dev/review 行尾也附同一摘要（命中率公式与 pi 主状态栏一致）；
 - **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked(reason)/passed），不依赖谁启动的；
 - **事后补报**：如果运行在扩展观察窗口之外结束（bash 拉起未走扩展、或 block 发生在 reload 之前），下一个回合会自动补报一次停止原因，状态栏与 `dev_review_status` 都带 `blocked (reason)`；
 - **统一时间线**：每个实例有 `reports/timeline.md`，按时间顺序记「plan 冻结 → dev rN → review rN → 决策/升级 → pass」，一行一个事件（时间戳 + 轮次 + 结果 + 摘要 + 产物路径）；running/blocked/ready 时编辑器下方 widget 显示相对路径，`dev_review_status` 输出 `Timeline:` 行；

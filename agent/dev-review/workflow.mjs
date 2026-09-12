@@ -1108,7 +1108,7 @@ function standalonePiInvocation() {
   return { command: process.env.PI_BIN || "pi", args: [] };
 }
 
-async function invokePiAgent({ role, state, paths, round, task, piInvocation, notify }) {
+async function invokePiAgent({ role, state, paths, round, task, piInvocation, notify, onStats }) {
   const developer = role === "developer";
   const rolePrompt = await loadRolePrompt(developer ? DEV_ROLE_PROMPT : REVIEW_ROLE_PROMPT);
   const config = developer
@@ -1139,6 +1139,7 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
   args.push(task);
 
   notify?.(`${developer ? "Development" : "Review"} agent: round ${round} started (${config.model}${config.thinking ? ` · thinking ${config.thinking}` : ""}).`);
+  const stats = createUsageStats();
   const output = await new Promise((resolve, reject) => {
     const child = spawn(piInvocation.command, args, {
       cwd: state.projectRoot,
@@ -1149,6 +1150,17 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
     let stdoutBuffer = "";
     let stderr = "";
     let finalText = "";
+    // Current provider request timing (one per assistant message).
+    let request = null;
+
+    const finalizeRequest = () => {
+      if (!request) return;
+      addUsageRequest(stats, request);
+      request = null;
+      const entry = usageEntry({ role, round, stats });
+      onStats?.({ role, round, line: entry.line, stats: entry });
+      queueUsageEntry(paths, entry);
+    };
 
     const label = `${developer ? "dev" : "review"} r${round}`;
     const streamEnabled = process.env.DEV_REVIEW_STREAM !== "0";
@@ -1165,7 +1177,21 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
       } catch {
         return;
       }
+      if (event.type === "message_start" && event.message?.role === "assistant") {
+        request = { startAt: Date.now(), firstDeltaAt: null, endAt: null, usage: null };
+        return;
+      }
+      if (event.type === "message_update" && request && !request.firstDeltaAt) {
+        // First streamed token (text or thinking): TTFT reference point.
+        request.firstDeltaAt = Date.now();
+        return;
+      }
       if (event.type === "message_end" && event.message?.role === "assistant") {
+        if (!request) request = { startAt: null, firstDeltaAt: null, endAt: null, usage: null };
+        request.endAt = Date.now();
+        request.usage = event.message.usage || null;
+        if (request.usage) finalizeRequest();
+        else request = null; // Provider reported no usage; drop the partial timing.
         finalText = messageText(event.message);
         if (streamEnabled) notify?.(`[${label}] 💬 ${truncate(finalText, 220)}`);
       } else if (streamEnabled && event.type === "tool_execution_start") {
@@ -1197,7 +1223,7 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
         reject(new Error(`Pi ${role} agent ended without a final assistant message${hint ? ` [likely ${hint}]` : ""}: ${stderr.slice(-1200).trim()}`));
         return;
       }
-      resolve({ finalText, stderr });
+      resolve({ finalText, stderr, usage: usageEntry({ role, round, stats }) });
     });
   });
 
@@ -1253,6 +1279,132 @@ function truncateText(value, max) {
   return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+// ---- Token usage tracking (dev/review child agents) ----------------------
+// The child pi runs with --mode json, so every provider request produces
+// message_start (request begins) → message_update (deltas) → message_end
+// (authoritative usage: input/output/cacheRead/cacheWrite/reasoning).
+// Cache hit rate uses the same formula as pi's own status bar:
+//   cacheRead / (input + cacheRead + cacheWrite).
+
+function formatTokenCount(value) {
+  const n = Number(value) || 0;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function createUsageStats() {
+  return {
+    requests: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    totalTokens: 0,
+    ttftMs: 0,
+    ttftSamples: 0,
+    outputMs: 0,
+    latest: null,
+    updatedAt: null,
+  };
+}
+
+/** Fold one completed provider request (usage + timing) into the running round stats. */
+function addUsageRequest(stats, request) {
+  const usage = request?.usage;
+  if (!usage) return stats;
+  stats.requests += 1;
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens"]) {
+    stats[key] += Number(usage[key]) || 0;
+  }
+  if (request.startAt && request.firstDeltaAt) {
+    stats.ttftMs += Math.max(0, request.firstDeltaAt - request.startAt);
+    stats.ttftSamples += 1;
+  }
+  if (request.firstDeltaAt && request.endAt) {
+    stats.outputMs += Math.max(0, request.endAt - request.firstDeltaAt);
+  }
+  stats.latest = {
+    input: Number(usage.input) || 0,
+    output: Number(usage.output) || 0,
+    cacheRead: Number(usage.cacheRead) || 0,
+    cacheWrite: Number(usage.cacheWrite) || 0,
+    reasoning: Number(usage.reasoning) || 0,
+    totalTokens: Number(usage.totalTokens) || 0,
+  };
+  stats.updatedAt = now();
+  return stats;
+}
+
+/** One-line human-readable summary: `tokens ↑… ↓… · R… (CH …) · … tok/s · TTFT …s`. */
+function usageLine(stats) {
+  if (!stats || !stats.requests) return null;
+  const prompt = stats.input + stats.cacheRead + stats.cacheWrite;
+  const cache = stats.cacheRead || stats.cacheWrite
+    ? `R${formatTokenCount(stats.cacheRead)}${stats.cacheWrite ? ` W${formatTokenCount(stats.cacheWrite)}` : ""}${prompt > 0 ? ` (CH ${((stats.cacheRead / prompt) * 100).toFixed(1)}%)` : ""}`
+    : null;
+  const speed = stats.outputMs > 0 ? `${(stats.output / (stats.outputMs / 1000)).toFixed(1)} tok/s` : null;
+  const ttft = stats.ttftSamples > 0 ? `TTFT ${(stats.ttftMs / stats.ttftSamples / 1000).toFixed(2)}s` : null;
+  return [
+    `tokens ↑${formatTokenCount(stats.input)} ↓${formatTokenCount(stats.output)}`,
+    cache,
+    speed,
+    ttft,
+    stats.reasoning ? `think ${formatTokenCount(stats.reasoning)}` : null,
+    stats.requests > 1 ? `${stats.requests} req` : null,
+  ].filter(Boolean).join(" · ");
+}
+
+/** Serializable per role+round entry persisted to reports/usage.json. */
+function usageEntry({ role, round, stats }) {
+  const prompt = stats.input + stats.cacheRead + stats.cacheWrite;
+  return {
+    role,
+    round,
+    requests: stats.requests,
+    input: stats.input,
+    output: stats.output,
+    cacheRead: stats.cacheRead,
+    cacheWrite: stats.cacheWrite,
+    reasoning: stats.reasoning,
+    totalTokens: stats.totalTokens,
+    ttftAvgMs: stats.ttftSamples ? Math.round(stats.ttftMs / stats.ttftSamples) : null,
+    outputPerSec: stats.outputMs > 0 ? Number((stats.output / (stats.outputMs / 1000)).toFixed(1)) : null,
+    cacheHitRate: prompt > 0 && (stats.cacheRead > 0 || stats.cacheWrite > 0)
+      ? Number((stats.cacheRead / prompt).toFixed(4))
+      : null,
+    line: usageLine(stats),
+    updatedAt: now(),
+  };
+}
+
+async function readUsageFile(paths) {
+  try {
+    return JSON.parse(await readFile(path.join(paths.reports, "usage.json"), "utf8"));
+  } catch {
+    return { entries: [] };
+  }
+}
+
+// Serialize usage.json writes; processLine is sync and each request completes
+// sequentially, but the writes themselves are async.
+let usageWriteChain = Promise.resolve();
+function queueUsageEntry(paths, entry) {
+  usageWriteChain = usageWriteChain
+    .then(async () => {
+      const file = await readUsageFile(paths);
+      const entries = Array.isArray(file.entries)
+        ? file.entries.filter((item) => !(item.role === entry.role && item.round === entry.round))
+        : [];
+      entries.push(entry);
+      entries.sort((left, right) => left.round - right.round || String(left.role).localeCompare(String(right.role)));
+      await writeJson(path.join(paths.reports, "usage.json"), { updatedAt: now(), entries });
+    })
+    .catch(() => {});
+  return usageWriteChain;
+}
+
 /**
  * Compact human-readable reason for a blocked workflow: reason code, summary,
  * decision questions with options, and the escalation file. Every place that
@@ -1303,7 +1455,7 @@ async function appendTimeline(paths, lines) {
   }
 }
 
-function timelineLine({ round, event, status, summary, artifact }) {
+function timelineLine({ round, event, status, summary, artifact, usage }) {
   const head = [
     localNow(),
     round ? `r${round}` : "workflow",
@@ -1313,11 +1465,12 @@ function timelineLine({ round, event, status, summary, artifact }) {
   const tail = [
     typeof summary === "string" && summary.trim() ? truncateText(summary, 400) : null,
     artifact ? `\`${artifact}\`` : null,
+    typeof usage === "string" && usage.trim() ? usage.trim() : null,
   ].filter(Boolean).join(" — ");
   return `- ${head}${tail ? ` — ${tail}` : ""}`;
 }
 
-function stateStatus(state, paths) {
+function stateStatus(state, paths, usageLines = []) {
   const lines = [
     `Workflow: ${state.workflow?.key || state.workflowId}`,
     `PRD: ${state.plan.sourcePath}`,
@@ -1332,12 +1485,25 @@ function stateStatus(state, paths) {
     `Artifacts: ${relativeTo(state.projectRoot, paths.root)}`,
     `Timeline: ${relativeTo(state.projectRoot, timelineFilePath(paths))}`,
   ];
+  for (const usageLine of usageLines) lines.push(usageLine);
   if (state.status === "blocked" && state.blocked) {
     lines.push(blockedNotice(state));
   } else if (state.blocked?.escalationPath) {
     lines.push(`Human decision file: ${state.blocked.escalationPath}`);
   }
   return lines.join("\n");
+}
+
+/** Latest usage entry per role, preformatted by the engine (reports/usage.json). */
+async function usageStatusLines(paths) {
+  const file = await readUsageFile(paths);
+  const entries = Array.isArray(file.entries) ? file.entries.filter((entry) => entry && entry.line) : [];
+  if (!entries.length) return [];
+  const latest = new Map();
+  for (const entry of entries) latest.set(entry.role, entry);
+  return ["developer", "reviewer"]
+    .filter((role) => latest.has(role))
+    .map((role) => `Usage ${role === "developer" ? "dev" : "review"} r${latest.get(role).round}: ${latest.get(role).line}`);
 }
 
 function mergeConfig(state, options, { requireModels = false, defaults = {} } = {}) {
@@ -1675,7 +1841,7 @@ async function planChangedSinceFrozen(state, projectRoot) {
   }
 }
 
-async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation(), notify, onReport, invokeAgent = invokePiAgent }) {
+async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation(), notify, onReport, invokeAgent = invokePiAgent, onStats }) {
   const projectRoot = gitRoot(cwd);
   const paths = await existingWorkflowPaths(projectRoot, options);
   const state = await readJson(paths.state);
@@ -1748,6 +1914,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     await writeJson(paths.state, state);
     let review;
     let reviewerBefore;
+    let reviewerUsage = null;
     try {
       reviewerBefore = await repositoryFingerprint(projectRoot);
       const output = await invokeAgent({
@@ -1758,7 +1925,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         task: makeReviewerTask(state, paths, round, relativeTo(projectRoot, developerMarkdownPath)),
         piInvocation,
         notify,
+        onStats,
       });
+      reviewerUsage = output.usage?.line || null;
       const reviewerAfter = await repositoryFingerprint(projectRoot);
       if (reviewerBefore !== reviewerAfter) {
         throw new Error("Reviewer changed the repository. Reviewers are read-only; inspect and revert/unblock this manually.");
@@ -1811,6 +1980,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       status: review.decision,
       summary: review.summary,
       artifact: relativeTo(projectRoot, reviewerMarkdownPath),
+      usage: reviewerUsage,
     }));
     history.reviewerPath = relativeTo(projectRoot, reviewerMarkdownPath);
     history.decision = review.decision;
@@ -1904,6 +2074,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     const previousReviewPath = state.history.at(-1)?.reviewerPath || null;
     const humanDecisionPath = state.pendingHumanDecisionPath;
     let developer;
+    let developerUsage = null;
     try {
       const output = await invokeAgent({
         role: "developer",
@@ -1913,7 +2084,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         task: makeDeveloperTask(state, paths, round, previousReviewPath, humanDecisionPath),
         piInvocation,
         notify,
+        onStats,
       });
+      developerUsage = output.usage?.line || null;
       developer = normalizeDeveloperReport(extractJsonObject(output.finalText));
     } catch (error) {
       state.currentRound = round;
@@ -1965,6 +2138,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       status: developer.status,
       summary: developer.summary,
       artifact: relativeTo(projectRoot, developerMarkdownPath),
+      usage: developerUsage,
     }));
 
     state.currentRound = round;
@@ -1993,7 +2167,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
   throw new Error("Workflow loop exited unexpectedly");
 }
 
-export async function runCommand({ args, cwd = process.cwd(), piInvocation, notify = console.log, onReport, invokeAgent } = {}) {
+export async function runCommand({ args, cwd = process.cwd(), piInvocation, notify = console.log, onReport, invokeAgent, onStats } = {}) {
   try {
     const tokens = splitArguments(args);
     const command = tokens.shift() || "help";
@@ -2012,6 +2186,7 @@ export async function runCommand({ args, cwd = process.cwd(), piInvocation, noti
         notify,
         onReport,
         invokeAgent,
+        onStats,
       });
       return {
         ok: true,
@@ -2025,7 +2200,7 @@ ${result.message}`,
       const root = gitRoot(cwd);
       const paths = await existingWorkflowPaths(root, options);
       const state = await readJson(paths.state);
-      return { ok: true, message: stateStatus(state, paths), state, paths };
+      return { ok: true, message: stateStatus(state, paths, await usageStatusLines(paths)), state, paths };
     }
     if (command === "list") {
       if (positionals.length) throw new Error("list does not accept positional arguments");
@@ -2058,7 +2233,7 @@ ${result.message}`,
     }
     if (command === "run") {
       if (positionals.length) throw new Error("run accepts options only");
-      const result = await runWorkflow({ cwd, options, piInvocation, notify, onReport, invokeAgent });
+      const result = await runWorkflow({ cwd, options, piInvocation, notify, onReport, invokeAgent, onStats });
       return { ok: true, message: result.message, ...result };
     }
     throw new Error(`Unknown /dev-review command: ${command}`);
@@ -2069,10 +2244,13 @@ ${result.message}`,
 
 export {
   DEFAULT_ARTIFACT_DIR,
+  addUsageRequest,
   blockedNotice,
   classifyAgentFailure,
+  createUsageStats,
   detectMasterPlan,
   extractJsonObject,
+  formatTokenCount,
   initializeWorkflow,
   adoptWorkflow,
   localNow,
@@ -2085,6 +2263,8 @@ export {
   splitArguments,
   timelineFilePath,
   timelineLine,
+  usageEntry,
+  usageLine,
   workflowPaths,
 };
 
