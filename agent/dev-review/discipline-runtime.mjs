@@ -71,6 +71,7 @@ export async function readWorkflowState(projectRoot) {
       phase: String(state.phase || ""),
       currentRound: state.currentRound ?? null,
       maxRounds: state.config?.maxReviewRounds ?? null,
+      updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null,
       openIssue: issue
         ? { id: issue.id, severity: issue.severity, requirement: issue.requirement || "" }
         : null,

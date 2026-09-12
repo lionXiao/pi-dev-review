@@ -115,6 +115,7 @@ export default function (pi: any) {
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     const s = await readDisciplineContext(ctx);
+    syncRunStatus(ctx, s.workflow);
     const { text, version } = await loadDiscipline();
     const route = routeDiscipline({
       event: "user_turn",
@@ -256,7 +257,16 @@ export default function (pi: any) {
   // When the loop stops, a summary user message wakes the main agent.
   const RUN_STATUS_KEY = "dev-review-run";
   const RUN_WIDGET_KEY = "dev-review-run";
+  const EXTERNAL_POLL_MS = Number(process.env.DEV_REVIEW_POLL_MS || 10000);
   let backgroundRun: { startedAt: number; lastMessage: string; timer: ReturnType<typeof setInterval> | null } | null = null;
+  let externalRun: { timer: ReturnType<typeof setInterval>; startedAt: number } | null = null;
+
+  const agoLabel = (iso: string | undefined) => {
+    const at = iso ? Date.parse(iso) : NaN;
+    if (!Number.isFinite(at)) return "未知";
+    const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
+    return seconds < 60 ? `${seconds}s 前` : `${Math.floor(seconds / 60)}m 前`;
+  };
 
   const summarizeRunStatus = (message: string) => {
     const text = String(message || "");
@@ -284,6 +294,92 @@ export default function (pi: any) {
         { placement: "belowEditor" },
       );
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${clock}`);
+    } catch {}
+  };
+
+  // External runs: an engine started by a plain CLI/bash invocation (or by a
+  // previous pi session). We cannot hook its completion, so poll its state
+  // file: keep the widget accurate and wake the agent once when it stops.
+  const stopExternalWatch = (ctx?: any) => {
+    if (externalRun?.timer) clearInterval(externalRun.timer);
+    externalRun = null;
+    try {
+      ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
+    } catch {}
+  };
+
+  const renderExternalWidget = (ctx: any, workflow: any) => {
+    try {
+      const round = `${workflow?.currentRound ?? "?"}/${workflow?.maxRounds ?? "?"}`;
+      ctx?.ui?.setWidget?.(
+        RUN_WIDGET_KEY,
+        [
+          `dev-review ▶ 运行中 · r${round}（外部启动）`,
+          `最近引擎更新：${agoLabel(workflow?.updatedAt)}`,
+          "输入不会被阻塞 · 详情用 dev_review_status",
+        ],
+        { placement: "belowEditor" },
+      );
+      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: running r${round}`);
+    } catch {}
+  };
+
+  const ensureExternalWatch = (ctx: any, workflow: any) => {
+    if (externalRun) return;
+    const tick = async () => {
+      if (backgroundRun) {
+        stopExternalWatch(ctx);
+        return;
+      }
+      const root = findProjectRoot(ctx?.cwd || process.cwd());
+      const fresh = await readWorkflowState(root);
+      if (fresh.found && String(fresh.status) === "running") {
+        renderExternalWidget(ctx, fresh);
+        return;
+      }
+      const label = !fresh.found
+        ? "stopped"
+        : String(fresh.status) === "blocked"
+          ? `blocked${fresh.openIssue ? ` (${fresh.openIssue.id})` : ""}`
+          : String(fresh.status);
+      stopExternalWatch(ctx);
+      try {
+        ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${label}`);
+      } catch {}
+      workflowNotify(`dev-review 引擎已停止：${label}`);
+      try {
+        pi.sendUserMessage(
+          `[dev-review] 后台引擎已停止（外部启动，轮询检测）：${label}。请用 dev_review_status 查看详情并向用户汇报。`,
+          { deliverAs: "followUp" },
+        );
+      } catch {}
+    };
+    externalRun = { timer: setInterval(() => void tick(), EXTERNAL_POLL_MS), startedAt: Date.now() };
+    void tick();
+  };
+
+  // Called on every turn: the footer/widget always reflect the real state on
+  // disk, whoever started the run. Managed runs keep their own widget.
+  const syncRunStatus = (ctx: any, workflow: any) => {
+    if (backgroundRun) return;
+    const status = workflow?.found ? String(workflow.status || "") : "";
+    if (status === "running") {
+      ensureExternalWatch(ctx, workflow);
+      renderExternalWidget(ctx, workflow);
+      return;
+    }
+    if (externalRun) stopExternalWatch(ctx);
+    try {
+      const label =
+        status === "blocked"
+          ? `blocked${workflow.openIssue ? ` (${workflow.openIssue.id})` : ""}`
+          : status === "passed" || status === "ready" || status === "abandoned"
+            ? status
+            : undefined;
+      ctx?.ui?.setStatus?.(RUN_STATUS_KEY, label ? `dev-review: ${label}` : undefined);
+    } catch {}
+    try {
+      ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
     } catch {}
   };
 
@@ -315,6 +411,7 @@ export default function (pi: any) {
         message: `后台已有运行中的工作流（已运行 ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s）：${backgroundRun.lastMessage}。用 dev_review_status 查看详情。`,
       };
     }
+    if (externalRun) stopExternalWatch(ctx);
     backgroundRun = { startedAt: Date.now(), lastMessage: "启动中…", timer: null };
     const update = (message: string) => {
       if (!backgroundRun) return;
@@ -348,6 +445,8 @@ export default function (pi: any) {
   pi.on("session_shutdown", () => {
     if (backgroundRun?.timer) clearInterval(backgroundRun.timer);
     backgroundRun = null;
+    if (externalRun?.timer) clearInterval(externalRun.timer);
+    externalRun = null;
   });
 
   // Tools: let the main agent drive the formal workflow steps on the user's
@@ -397,8 +496,10 @@ export default function (pi: any) {
       });
       const line = await disciplineStatusLine(ctx?.cwd || process.cwd());
       const runLine = backgroundRun
-        ? `[run] 后台运行中：${backgroundRun.lastMessage}`
-        : "[run] 无后台运行";
+        ? `[run] 托管后台运行中：${backgroundRun.lastMessage}`
+        : String(result?.state?.status || "") === "running"
+          ? "[run] 引擎运行中（外部启动，扩展在轮询跟踪）"
+          : "[run] 无运行中的引擎";
       return { content: [{ type: "text", text: `${result.message}\n\n${line}\n${runLine}` }], details: {} };
     },
   });
@@ -447,6 +548,31 @@ export default function (pi: any) {
     desktopNotify("dev-review", summary || "workflow update");
     void feishuNotify(summary || "workflow update");
   };
+
+  pi.registerTool({
+    name: "dev_review_start",
+    label: "Dev-review start",
+    description:
+      "Start a NEW dev-review workflow instance for a plan, in the background (non-blocking). " +
+      "Instances are keyed by plan content hash + label: use this when no instance exists for the current plan " +
+      "(first batch, or the plan file was amended so its hash changed), or when you need a separate instance per " +
+      "batch via label. dev_review_run only resumes an existing instance. Progress widget + completion summary " +
+      "are the same as dev_review_run.",
+    parameters: Type.Object({
+      plan: Type.String({ description: "Path to the plan file, e.g. docs/prd/v1.2-refactor-plan.md" }),
+      test: Type.Optional(Type.String({ description: "Test command recorded in the workflow (combined string; quote inside is fine)" })),
+      max_rounds: Type.Optional(Type.Number({ description: "Override max review rounds" })),
+      label: Type.Optional(Type.String({ description: "Workflow label; use a distinct label per batch sharing the same plan file" })),
+    }),
+    async execute(toolCallId: any, params: any, signal: any, onUpdate: any, ctx: any) {
+      const args = ["start", params.plan];
+      if (params.test) args.push("--test", JSON.stringify(String(params.test)));
+      if (params.max_rounds) args.push("--max-rounds", String(params.max_rounds));
+      if (params.label) args.push("--workflow", params.label);
+      const started = startBackgroundRun(args.join(" "), ctx);
+      return { content: [{ type: "text", text: started.message }], details: {} };
+    },
+  });
 
   pi.registerTool({
     name: "dev_review_run",

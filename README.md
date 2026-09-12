@@ -114,16 +114,18 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 
 决策文件要点：**选了什么 + 要 developer 干什么**，文采不重要。想反问也可以写在里面（"先回答 X 再继续"），dev 下一轮会先回答。
 
-### 3.4 后台运行（不阻塞对话）
+### 3.3 后台运行（不阻塞对话）
 
 `run` / `start` 不阻塞主 agent 的回合：引擎在后台继续跑，编辑器下方有一条实时更新的进度条（运行时长 · 最近引擎事件 · 轮次），底部状态栏同步显示。你可以随时继续聊天，主 agent 也能正常回复。机器停止时（pass / blocked / max-rounds）会有一条总结消息自动唤醒主 agent，直接给出结果与下一步。
 
 - 进度条：`dev-review ▶ 运行中 3m12s` + 最近一条引擎事件，每秒更新；
+- **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked/passed），不依赖谁启动的；
 - 随时查询：`dev_review_status` 工具或 `/dev-review status`，输出带 `[run]` 行；
 - 同一时间只允许一个后台运行，重复启动会被拒绝；
+- 新建实例用 `dev_review_start`（工具，plan 哈希变化/新批次必需）；`dev_review_run` 只续跑已有实例，两者都走后台上进；
 - 目前不提供中途取消（引擎无 abort 接口）：要停只能等到停止条件，或 `/dev-review escape` 挂起纪律后手动处理。
 
-### 3.3 日常命令
+### 3.4 日常命令
 
 ```text
 /dev-review status     # 状态（blocked 时把 escalation 摘要也展示）
@@ -150,7 +152,7 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 1. **TUI 实时流**：子 Agent 每个工具调用/助手消息/失败以事件形式推到主 TUI（dev/reviewer r{N} 前缀）。设 `DEV_REVIEW_STREAM=0` 关闭。
 2. **每轮条目**：`◆ Development` / `◇ Review` / `⚠ Escalation` markdown 条目追加进会话流（Ctrl+O 展开，含完整 handoff）。
 3. **磁盘全量**：`handoffs/`（每轮 JSON+MD）、`reports/`（最终报告）、`private/*-sessions/*.jsonl`（两边的完整过程，可用 `pi --session-dir ... -r` 交互回看）。
-4. **后台运行进度条**：`run` / `start` 后台执行时，编辑器下方显示实时进度（运行时长 + 最近引擎事件），主 agent 回合不被占用；停止时注入总结消息。
+4. **后台运行进度条**：`run` / `start` 后台执行时，编辑器下方显示实时进度（运行时长 + 最近引擎事件），主 agent 回合不被占用；停止时注入总结消息。CLI/bash 直接拉起的「外部启动」由轮询跟踪，同样有进度与停止唤醒。
 
 ## 6. 版本 v2 相对原包的改进清单
 
@@ -159,7 +161,7 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 3. **escalation 断点重推**：重启后 `/dev-review run` 会重新展示 blocked 原因（不再只报错拒绝）
 4. **协议错误内容增强**：dev 报告 JSON 解析失败时，原始报告随 escalation 留存并结构化渲染（"Questions for you" 直接标题化，blockers 即使格式违规也可读）
 5. **行内决策**：`resolve --choose/--note`，引擎自动生成决策文档（零 agent 依赖、零文件书写）
-6. **主 agent 工具化**：`dev_review_resolve` / `dev_review_run` / `dev_review_status` 三个工具——主 agent 用自然语言即可驱动协议（CLAUDE.md 纪律从"必需品"降为"保险"）
+6. **主 agent 工具化**：`dev_review_start` / `dev_review_resolve` / `dev_review_run` / `dev_review_status` 四个工具——主 agent 用自然语言即可驱动协议（CLAUDE.md 纪律从"必需品"降为"保险"）
 7. **断点续跑 review**：轮内中断（如协调者崩溃）后重启 run，若当前轮 dev 报告已完整落盘则直接进 reviewer，不再重复烧 dev 轮
 8. **`unlock` 命令**：中断恢复正式化（替代手改 state.json），`--note` 记录原因，写入 `state.unlockLog` 审计
 9. **大 diff 容错**：`runGit` 的 `maxBuffer` 提到 512MB——重录二进制基线（PNG）会让 `git diff --binary` 超过 Node 默认 1MB 缓冲，曾在 reviewer 启动前崩掉整轮（ENOBUFS）

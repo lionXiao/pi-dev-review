@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 — 2026-09-12
+
+- **状态显示不再受启动方式影响**：新增每轮状态同步，底部状态栏/进度条始终反映磁盘上的真实工作流状态（running rN / blocked(issue) / passed / ready）。
+- **外部启动的运行可见可控**：CLI/bash 直接拉起（或上个会话遗留）的运行会被轮询跟踪（默认 10s，`DEV_REVIEW_POLL_MS` 可调）：进度条标注「外部启动」，停止时同样唤醒主 agent。修复了「状态栏停留在旧的 passed」问题。
+- **新增 `dev_review_start` 工具**：后台新建工作流实例（plan / test / max_rounds / label），解决多批次场景下 plan 哈希变化、旧实例已 passed 时 `run` 无法启动的问题；`dev_review_run` 只续跑已有实例，两者都走后台上进。
+
 ## 0.2.0 — 2026-09-12
 
 - **后台运行**：`dev_review_run` 工具与 `/dev-review run|start` 不再阻塞主 agent 回合——引擎在进程内后台执行，编辑器下方显示每秒更新的进度条（运行时长 + 最近引擎事件），底部状态栏同步；停止时自动注入总结消息唤醒主 agent（pass / blocked / max-rounds / 失败）。
