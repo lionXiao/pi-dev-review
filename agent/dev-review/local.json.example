@@ -1,0 +1,6 @@
+{
+  "developerModel": "provider/developer-model",
+  "reviewerModel": "provider/reviewer-model",
+  "developerThinking": "high",
+  "reviewerThinking": "high"
+}

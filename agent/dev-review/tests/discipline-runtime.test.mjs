@@ -1,0 +1,106 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  findProjectRoot,
+  readWorkflowState,
+  readOverride,
+  writeOverride,
+  clearOverride,
+  loadDiscipline,
+  renderDiscipline,
+  renderSuspended,
+} from "../discipline-runtime.mjs";
+
+async function tempProject() {
+  const root = await mkdtemp(join(tmpdir(), "dev-review-disc-"));
+  await mkdir(join(root, ".git"), { recursive: true });
+  return root;
+}
+
+function stateFixture(status = "blocked") {
+  return {
+    workflow: { key: "demo--abc12345" },
+    status,
+    phase: "human_decision",
+    currentRound: 3,
+    config: { maxReviewRounds: 10 },
+    openIssues: [{ id: "R1-001", severity: "major", requirement: "举例" }],
+  };
+}
+
+test("findProjectRoot: nearest workflow pointer wins, else git root", async () => {
+  const root = await tempProject();
+  const nested = join(root, "docs", "prd");
+  await mkdir(nested, { recursive: true });
+  assert.equal(findProjectRoot(nested), root);
+
+  await mkdir(join(nested, ".ai-dev-review"), { recursive: true });
+  await writeFile(join(nested, ".ai-dev-review", "active-workflow.json"), '{}\n', "utf8");
+  assert.equal(findProjectRoot(nested), nested);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("readWorkflowState: reads pointer + state, degrades gracefully", async () => {
+  const root = await tempProject();
+  const artifact = join(root, ".ai-dev-review", "demo--abc12345");
+  await mkdir(artifact, { recursive: true });
+  await writeFile(
+    join(root, ".ai-dev-review", "active-workflow.json"),
+    JSON.stringify({ workflowKey: "demo--abc12345", artifactDir: ".ai-dev-review/demo--abc12345" }),
+    "utf8",
+  );
+  await writeFile(join(artifact, "state.json"), JSON.stringify(stateFixture()), "utf8");
+
+  const wf = await readWorkflowState(root);
+  assert.equal(wf.found, true);
+  assert.equal(wf.status, "blocked");
+  assert.equal(wf.currentRound, 3);
+  assert.equal(wf.openIssue.id, "R1-001");
+
+  assert.deepEqual(await readWorkflowState(null), { found: false });
+  assert.deepEqual(await readWorkflowState(join(root, "nope")), { found: false });
+  await rm(root, { recursive: true, force: true });
+});
+
+test("override round-trip: write, read while valid, expiry hides it, clear removes it", async () => {
+  const root = await tempProject();
+
+  const rec = await writeOverride(root, { reason: "线上热修", minutes: 30 });
+  assert.equal(rec.forever, false);
+  assert.ok(Date.parse(rec.until) > Date.now());
+
+  const read = await readOverride(root);
+  assert.equal(read.reason, "线上热修");
+
+  await writeOverride(root, { reason: "已过期", minutes: -1 });
+  assert.equal(await readOverride(root), null);
+
+  const forever = await writeOverride(root, { reason: "永久挂起", minutes: null });
+  assert.equal(forever.until, null);
+  assert.equal((await readOverride(root)).reason, "永久挂起");
+
+  await clearOverride(root);
+  assert.equal(await readOverride(root), null);
+
+  const audit = await readFile(join(root, ".ai-dev-review", "discipline-audit.jsonl"), "utf8");
+  const actions = audit.trim().split("\n").map((line) => JSON.parse(line).action);
+  assert.deepEqual(actions, ["suspend", "suspend", "suspend", "resume"]);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("rendering: discipline carries the cache marker and live state line", async () => {
+  const { text, version } = await loadDiscipline();
+  assert.ok(text.length > 0);
+  assert.ok(/^[0-9a-f]{8}$/.test(version));
+
+  const rendered = renderDiscipline(text, await readWorkflowState(null));
+  assert.ok(rendered.includes("<!-- dev-review-discipline -->"));
+  assert.ok(rendered.includes("当前工作流：未知"));
+
+  const suspended = renderSuspended({ reason: "热修", until: new Date(Date.now() + 60_000).toISOString() });
+  assert.ok(suspended.includes("热修"));
+});

@@ -1,0 +1,6 @@
+local.json
+notify.json
+.backups/
+.DS_Store
+node_modules/
+*.log
