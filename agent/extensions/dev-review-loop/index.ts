@@ -9,6 +9,7 @@ import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { runCommand } from "../../dev-review/workflow.mjs";
 import {
   DISCIPLINE_MARKER,
+  POLICY_MARKER,
   desiredDiscipline,
   isWorkflowActive,
   routeDiscipline,
@@ -18,10 +19,13 @@ import {
   clearOverride,
   findProjectRoot,
   loadDiscipline,
+  loadExtensionConfig,
+  loadPolicy,
   readOverride,
   readWorkflowState,
   renderDiscipline,
   renderLifted,
+  renderPolicy,
   renderSuspended,
   writeOverride,
 } from "../../dev-review/discipline-runtime.mjs";
@@ -104,8 +108,12 @@ export default function (pi: any) {
   const checkpointDiscipline = async (ctx: any) => {
     const s = await readDisciplineContext(ctx);
     const { text, version } = await loadDiscipline();
+    const policy = await loadPolicy();
+    const config = await loadExtensionConfig();
+    const policyBlock = config.injectWorkingAgreement && policy.text ? renderPolicy(policy.text) : "";
+    const disciplineBlock = s.desired ? renderDiscipline(text, s.workflow) : "";
     disciplineState.baselineActive = s.desired;
-    disciplineState.baselineText = s.desired ? renderDiscipline(text, s.workflow) : "";
+    disciplineState.baselineText = [policyBlock, disciplineBlock].filter(Boolean).join("\n\n");
     disciplineState.appendedKey = s.desired ? `active:${version}` : "lifted";
   };
 
@@ -114,6 +122,7 @@ export default function (pi: any) {
   pi.on("session_tree", async (_event: any, ctx: any) => { await checkpointDiscipline(ctx); });
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
+    if (!disciplineState.baselineText) await checkpointDiscipline(ctx);
     const s = await readDisciplineContext(ctx);
     syncRunStatus(ctx, s.workflow);
     const { text, version } = await loadDiscipline();
@@ -128,7 +137,7 @@ export default function (pi: any) {
     });
     disciplineState.appendedKey = route.appendedKey;
     const out: any = {};
-    if (disciplineState.baselineActive && disciplineState.baselineText) {
+    if (disciplineState.baselineText) {
       out.systemPrompt = `${event.systemPrompt}\n\n${disciplineState.baselineText}`;
     }
     if (route.action === "append") {
@@ -146,9 +155,10 @@ export default function (pi: any) {
   // before_agent_start does not fire again. Patch the provider payload only
   // when the baseline marker is missing; never toggle per turn.
   const payloadHasMarker = (payload: any): boolean => {
+    const markers = [DISCIPLINE_MARKER, POLICY_MARKER];
     const has = (value: any): boolean =>
       typeof value === "string"
-        ? value.includes(DISCIPLINE_MARKER)
+        ? markers.some((marker) => value.includes(marker))
         : Array.isArray(value) && value.some((part: any) => has(part?.text));
     try {
       if (has(payload?.system)) return true;
@@ -180,7 +190,7 @@ export default function (pi: any) {
   };
 
   pi.on("before_provider_request", (event: any) => {
-    if (!disciplineState.baselineActive || !disciplineState.baselineText) return;
+    if (!disciplineState.baselineText) return;
     try {
       if (payloadHasMarker(event.payload)) return;
       return patchPayloadSystem(event.payload, disciplineState.baselineText) ?? undefined;

@@ -61,7 +61,7 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 
 验证：`pi` 启动后 `/dev-review help`。
 
-主 agent 纪律由扩展**自动注入**（见 §7），项目 `CLAUDE.md` 里不再需要手写；已有手写纪律段落的项目建议替换为一行指针，避免两份文本各自漂移。
+主 agent 纪律与工作协议由扩展**自动注入**（见 §7）：项目 `CLAUDE.md` 里**不需要任何配置**，可以把旧的手写纪律段落全部删掉。
 
 ## 3. 用法
 
@@ -168,9 +168,16 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 10. **fingerprint 失败升级化**：reviewer 前后的工作树指纹计算失败现在走 escalation（blocked+留痕），不再裸崩卡 running
 11. `models.json` 能力元数据：多模态模型记得声明 `"input": ["text", "image"]`（否则模型实际支持也不可用）
 
-## 7. 主 agent 纪律（自动注入）
+## 7. 主 agent 纪律与工作协议（自动注入，项目零配置）
 
-主 agent 纪律不再需要手抄进项目 `CLAUDE.md`：dev-review-loop 扩展会**自动检测活跃工作流并注入**，内容单一来源为 `~/.pi/agent/dev-review/discipline.md`。
+主 agent 的行为约定不再需要手抄进项目 `CLAUDE.md`，两份文本都是单一来源：
+
+| 文本 | 来源 | 生效时机 |
+| --- | --- | --- |
+| **通用工作协议**：改动分级（直接做/先问人/走工作流）、重要决策提问线、不拿流程当挡箭牌 | `policy.md` | **始终**（任何项目、任何状态；`local.json` 里 `injectWorkingAgreement: false` 可关） |
+| **工作流纪律**：秘书不是施工队、用工具推进、归因与留痕、逃离 | `discipline.md` | 仅当项目存在活跃实例（ready/running/blocked）且未被挂起 |
+
+两者合并且与注入机制配合，因此**项目侧一行都不用写**；扩展没装/没加载时没有任何行为约定（这是“零配置”的代价，接受即可）。
 
 | 事件 | 时机 | 动作 | 成本 |
 | --- | --- | --- | --- |

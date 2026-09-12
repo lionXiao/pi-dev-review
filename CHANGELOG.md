@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — 2026-09-12
+
+- **通用工作协议（始终注入）**：新增 `policy.md`（改动分级 / 提问线 / 不拿流程当挡箭牌），由扩展在任何项目、任何状态注入；工作流纪律仍只在活跃期注入。项目 `CLAUDE.md` 从此**零配置**（可直接清空旧的纪律段落）。
+  - 基线组合 = policy + (活跃时) discipline；policy 恒定不变，缓存行为不变；系统提示词仅在 checkpoint 时刻变化；
+  - `before_provider_request` 补写改为按两个标记（policy / discipline）判重；
+  - `local.json` 新增 `injectWorkingAgreement`（默认 true）开关；
+  - `discipline.md` 移除重复的提问线/态度段；新增 policy 相关单测。
+
 ## 0.3.2 — 2026-09-12
 
 - `discipline.md` 吸收两条原先只写在项目 CLAUDE.md 里的通用规则：实现细节讨论引导（dev 私有 session + resolve note 带回结论）、工作树非工作流变更的归因纪律；解除纪律后的改动也明确要求留痕「未经工作流评审」。项目 CLAUDE.md 可据此只保留降级兜底 + 项目级改动分级。

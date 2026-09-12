@@ -32,7 +32,7 @@ mkdir -p "$TARGET_ROOT/dev-review/prompts" "$TARGET_ROOT/dev-review/tests" "$TAR
 # Versioned files only: personal files (local.json / notify.json) stay untouched.
 cp "$SOURCE_DIR/README.md" "$TARGET_ROOT/dev-review/README.md"
 for file in workflow.mjs defaults.json local.json.example notify.json.example \
-            discipline.md discipline-router.mjs discipline-runtime.mjs; do
+            discipline.md policy.md discipline-router.mjs discipline-runtime.mjs; do
   cp "$SOURCE_DIR/agent/dev-review/$file" "$TARGET_ROOT/dev-review/$file"
 done
 cp "$SOURCE_DIR/agent/dev-review/prompts/developer.md" "$TARGET_ROOT/dev-review/prompts/developer.md"

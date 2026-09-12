@@ -17,6 +17,7 @@
  */
 
 export const DISCIPLINE_MARKER = "<!-- dev-review-discipline -->";
+export const POLICY_MARKER = "<!-- dev-review-policy -->";
 
 /** Statuses that mean the workflow no longer applies. */
 export const INACTIVE_STATUSES = new Set(["passed", "abandoned", "complete", "cancelled"]);

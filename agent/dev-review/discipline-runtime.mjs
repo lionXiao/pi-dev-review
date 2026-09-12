@@ -8,15 +8,19 @@ import { readFile, writeFile, rm, appendFile, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { DISCIPLINE_MARKER, isOverrideActive } from "./discipline-router.mjs";
+import { DISCIPLINE_MARKER, POLICY_MARKER, isOverrideActive } from "./discipline-router.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DISCIPLINE_PATH = join(here, "discipline.md");
+const POLICY_PATH = join(here, "policy.md");
+const CONFIG_PATH = join(here, "local.json");
 export const ARTIFACT_ROOT = ".ai-dev-review";
 export const OVERRIDE_NAME = "discipline-override.json";
 export const AUDIT_NAME = "discipline-audit.jsonl";
 
 let cachedDiscipline = null;
+let cachedPolicy = null;
+let cachedConfig = null;
 
 /** Load the single-source discipline text; version = content hash prefix. */
 export async function loadDiscipline() {
@@ -31,6 +35,40 @@ export async function loadDiscipline() {
     cachedDiscipline = { text: "", version: "missing" };
   }
   return cachedDiscipline;
+}
+
+/** Load the always-on working agreement (injected whenever config allows). */
+export async function loadPolicy() {
+  if (cachedPolicy) return cachedPolicy;
+  try {
+    const text = (await readFile(POLICY_PATH, "utf8")).trim();
+    cachedPolicy = {
+      text,
+      version: createHash("sha256").update(text).digest("hex").slice(0, 8),
+    };
+  } catch {
+    cachedPolicy = { text: "", version: "missing" };
+  }
+  return cachedPolicy;
+}
+
+/** Extension-level config from local.json (defaults are safe). */
+export async function loadExtensionConfig() {
+  if (cachedConfig) return cachedConfig;
+  try {
+    const raw = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+    cachedConfig = { injectWorkingAgreement: raw.injectWorkingAgreement !== false };
+  } catch {
+    cachedConfig = { injectWorkingAgreement: true };
+  }
+  return cachedConfig;
+}
+
+/** Reset caches (used by tests and /reload with edited files). */
+export function resetRuntimeCaches() {
+  cachedDiscipline = null;
+  cachedPolicy = null;
+  cachedConfig = null;
 }
 
 export function artifactRoot(projectRoot) {
@@ -120,6 +158,10 @@ export async function appendAudit(projectRoot, entry) {
       "utf8",
     );
   } catch {}
+}
+
+export function renderPolicy(template) {
+  return `${POLICY_MARKER}\n${template}`;
 }
 
 export function renderDiscipline(template, workflow) {

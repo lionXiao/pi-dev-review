@@ -6,6 +6,7 @@
 - **外部启动的运行**：用 CLI/bash 直接拉起引擎（或换 session 后遗留的运行）会被轮询识别（默认 10s，`DEV_REVIEW_POLL_MS` 可调），进度条标注「外部启动」，停止时会唤醒主 agent；底部状态栏反映磁盘真实状态，不会因启动方式不同而不一致。
 - **子 agent 不受纪律钩子影响**：developer / reviewer 以 `--no-extensions` 启动；`discipline.md` 的规则只约束主 agent。
 - **审计文件不要提交**：`.ai-dev-review/`（含 `discipline-audit.jsonl`、handoffs、private sessions）是项目本地运行态。
+- **项目零配置**：纪律与工作协议均由扩展注入，项目 `CLAUDE.md` 不需要写任何 dev-review 相关内容（旧的手写段落可直接删除）。代价：扩展未安装/未加载时没有任何行为约定。
 - **测试按 glob 传参**：`node --test tests/*.test.mjs`；直接把目录传给 `--test` 在部分 Node 版本不生效。
 - **多工作流并行**：不推荐；要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。
 - **计划改了就换实例**：实例按「计划文件 hash + label」区分；下一批次改了计划就要用 `dev_review_start` 新建。对已 passed 的旧实例执行 `run`、且计划文件已变时，引擎会报错提示改用 `start`（不再静默无操作）。

@@ -11,7 +11,10 @@ import {
   writeOverride,
   clearOverride,
   loadDiscipline,
+  loadPolicy,
+  loadExtensionConfig,
   renderDiscipline,
+  renderPolicy,
   renderSuspended,
 } from "../discipline-runtime.mjs";
 
@@ -103,4 +106,20 @@ test("rendering: discipline carries the cache marker and live state line", async
 
   const suspended = renderSuspended({ reason: "热修", until: new Date(Date.now() + 60_000).toISOString() });
   assert.ok(suspended.includes("热修"));
+});
+
+test("policy: always-on working agreement loads with its own marker", async () => {
+  const { text, version } = await loadPolicy();
+  assert.ok(text.length > 0);
+  assert.ok(/^[0-9a-f]{8}$/.test(version));
+
+  const rendered = renderPolicy(text);
+  assert.ok(rendered.startsWith("<!-- dev-review-policy -->"));
+  assert.ok(rendered.includes("改动分级"));
+  assert.ok(rendered.includes("提问线"));
+});
+
+test("config: working-agreement injection defaults on", async () => {
+  const config = await loadExtensionConfig();
+  assert.equal(typeof config.injectWorkingAgreement, "boolean");
 });
