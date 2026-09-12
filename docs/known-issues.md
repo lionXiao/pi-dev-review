@@ -8,4 +8,5 @@
 - **审计文件不要提交**：`.ai-dev-review/`（含 `discipline-audit.jsonl`、handoffs、private sessions）是项目本地运行态。
 - **测试按 glob 传参**：`node --test tests/*.test.mjs`；直接把目录传给 `--test` 在部分 Node 版本不生效。
 - **多工作流并行**：不推荐；要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。
+- **计划改了就换实例**：实例按「计划文件 hash + label」区分；下一批次改了计划就要用 `dev_review_start` 新建。对已 passed 的旧实例执行 `run`、且计划文件已变时，引擎会报错提示改用 `start`（不再静默无操作）。
 - **旧安装包已废弃**：`pi-dev-review-workflow-2026-09-07`（Downloads 里的老包）以及更早的手抄版 `CLAUDE.md` 纪律段落，均被本仓库取代；不要再运行老包的 `install.sh`。

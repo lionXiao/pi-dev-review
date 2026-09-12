@@ -1461,13 +1461,43 @@ async function emitReport(onReport, notify, report) {
   }
 }
 
+/**
+ * Detect that the plan file on disk no longer matches the version frozen with
+ * this workflow instance. Used to fail loudly instead of silently no-op'ing
+ * when `run` is aimed at an instance that already passed but its plan changed
+ * (which means the user wants a NEW instance for a new plan version).
+ */
+async function planChangedSinceFrozen(state, projectRoot) {
+  const plan = state?.plan;
+  if (!plan || typeof plan.sourcePath !== "string" || typeof plan.sha256 !== "string") return null;
+  const sourcePath = path.resolve(projectRoot, plan.sourcePath);
+  if (!existsSync(sourcePath)) return null;
+  try {
+    const current = hashBuffer(await readFile(sourcePath));
+    if (current === plan.sha256) return null;
+    return { frozen: plan.sha256.slice(0, 8), current: current.slice(0, 8), sourcePath: plan.sourcePath };
+  } catch {
+    return null;
+  }
+}
+
 async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation(), notify, onReport, invokeAgent = invokePiAgent }) {
   const projectRoot = gitRoot(cwd);
   const paths = await existingWorkflowPaths(projectRoot, options);
   const state = await readJson(paths.state);
   if (state.projectRoot !== projectRoot) throw new Error(`Workflow was created at ${state.projectRoot}. After copying its .ai-dev-review directory into this checkout, run /dev-review adopt before resuming.`);
   await writeActiveWorkflow(projectRoot, paths, state);
-  if (state.status === "passed") return { state, paths, message: "Workflow already passed. Use status to inspect its final report." };
+  if (state.status === "passed") {
+    const changed = await planChangedSinceFrozen(state, projectRoot);
+    if (changed) {
+      throw new Error(
+        `Workflow ${state.workflow?.key || paths.root} already passed, and the plan file changed since it was frozen ` +
+        `(${changed.frozen} -> ${changed.current}): run start to create a new instance for the new plan version ` +
+        `(optionally with --workflow <label>); run only resumes existing instances.`,
+      );
+    }
+    return { state, paths, message: "Workflow already passed. Use status to inspect its final report." };
+  }
   if (state.status === "blocked") {
     // Resume surface: re-render the stored escalation in the main TUI so an
     // interrupted session can pick up exactly where the human decision left off.
@@ -1825,6 +1855,7 @@ export {
   adoptWorkflow,
   normalizeDeveloperReport,
   normalizeReviewerReport,
+  planChangedSinceFrozen,
   runWorkflow,
   splitArguments,
   workflowPaths,
