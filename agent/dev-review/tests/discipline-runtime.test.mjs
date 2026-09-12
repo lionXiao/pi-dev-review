@@ -81,6 +81,7 @@ test("readWorkflowState: reads pointer + state, degrades gracefully", async () =
     { question: "谁做 L1 验收？", options: ["用户", "developer", "coordinator"] },
     { question: "纯字符串问题", options: [] },
   ]);
+  assert.equal(wf.timelinePath, ".ai-dev-review/demo--abc12345/reports/timeline.md");
 
   assert.deepEqual(await readWorkflowState(null), { found: false });
   assert.deepEqual(await readWorkflowState(join(root, "nope")), { found: false });

@@ -5,7 +5,7 @@
 
 import { existsSync } from "node:fs";
 import { readFile, writeFile, rm, appendFile, mkdir } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { DISCIPLINE_MARKER, POLICY_MARKER, isOverrideActive } from "./discipline-router.mjs";
@@ -134,6 +134,7 @@ export async function readWorkflowState(projectRoot) {
       openIssue: issue
         ? { id: issue.id, severity: issue.severity, requirement: issue.requirement || "" }
         : null,
+      timelinePath: relative(projectRoot, join(artifactDir, "reports", "timeline.md")),
       blocked,
     };
   } catch {

@@ -11,7 +11,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rename, writeFile, appendFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -57,6 +57,25 @@ stored with credentials; Pi continues to use its normal provider auth.
 
 function now() {
   return new Date().toISOString();
+}
+
+/**
+ * Human-facing timestamps for markdown artifacts (timeline, handoffs,
+ * escalation, final report) use the machine's local timezone; JSON state files
+ * keep ISO/UTC so comparisons and resume logic stay timezone-independent.
+ */
+function localNow(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function localTimezoneLabel(date = new Date()) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMinutes);
+  const pad = (value) => String(value).padStart(2, "0");
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  return `${zone} (UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)})`;
 }
 
 function sha256(value) {
@@ -732,7 +751,7 @@ function developerMarkdown({ round, report, state, planPath, previousReviewPath,
 
   return `# Development handoff — Round ${round}
 
-- **Generated:** ${now()}
+- **Generated:** ${localNow()}
 - **Status:** ${report.status}
 - **Frozen plan:** ${markdownCode(planPath)}
 ${previousReviewPath ? `- **Input review handoff:** ${markdownCode(previousReviewPath)}\n` : ""}${humanDecisionPath ? `- **Human decision input:** ${markdownCode(humanDecisionPath)}\n` : ""}
@@ -805,7 +824,7 @@ function reviewerMarkdown({ round, report, planPath, developerPath, openIssues }
 
   return `# Review handoff — Round ${round}
 
-- **Generated:** ${now()}
+- **Generated:** ${localNow()}
 - **Decision:** ${report.decision}
 - **Frozen plan:** ${markdownCode(planPath)}
 - **Development handoff reviewed:** ${markdownCode(developerPath)}
@@ -893,7 +912,7 @@ function escalationMarkdown({ state, reason, details, paths }) {
 
   return `# Human decision required
 
-- **Generated:** ${now()}
+- **Generated:** ${localNow()}
 - **Reason:** ${reason}
 - **Round:** ${current}
 - **Frozen plan:** ${markdownCode(state.plan.snapshotPath)}
@@ -930,13 +949,14 @@ function finalReportMarkdown(state) {
   const rounds = state.history.filter((item) => item.reviewerPath).length;
   return `# Development / review workflow result
 
-- **Generated:** ${now()}
+- **Generated:** ${localNow()}
 - **Status:** passed
 - **Frozen plan:** ${markdownCode(state.plan.snapshotPath)}
 - **Base commit:** ${markdownCode(state.base.head)}
 - **Completed review rounds:** ${rounds}
 - **Developer model:** ${markdownCode(state.config.developerModel)}
 - **Reviewer model:** ${markdownCode(state.config.reviewerModel)}
+- **Timeline:** ${markdownCode(`${state.artifactDir}/reports/timeline.md`)}
 
 ## Review history
 
@@ -1168,11 +1188,13 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
     child.on("close", (code, signal) => {
       if (stdoutBuffer.trim()) processLine(stdoutBuffer);
       if (code !== 0) {
-        reject(new Error(`Pi ${role} agent failed (exit ${code ?? "unknown"}${signal ? `, ${signal}` : ""}): ${stderr.slice(-1200).trim()}`));
+        const hint = classifyAgentFailure(stderr);
+        reject(new Error(`Pi ${role} agent failed (exit ${code ?? "unknown"}${signal ? `, ${signal}` : ""})${hint ? ` [likely ${hint}]` : ""}: ${stderr.slice(-1200).trim()}`));
         return;
       }
       if (!finalText) {
-        reject(new Error(`Pi ${role} agent ended without a final assistant message: ${stderr.slice(-1200).trim()}`));
+        const hint = classifyAgentFailure(stderr);
+        reject(new Error(`Pi ${role} agent ended without a final assistant message${hint ? ` [likely ${hint}]` : ""}: ${stderr.slice(-1200).trim()}`));
         return;
       }
       resolve({ finalText, stderr });
@@ -1181,6 +1203,28 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
 
   notify?.(`${developer ? "Development" : "Review"} agent: round ${round} finished.`);
   return output;
+}
+
+/**
+ * Peek at a failed child agent's stderr and name the most likely cause, so a
+ * quota/auth/network failure is distinguishable at a glance from a protocol
+ * violation. Pure heuristic — the raw stderr tail is always kept below it.
+ */
+function classifyAgentFailure(text) {
+  const value = String(text || "");
+  if (/(\b429\b|too many requests|rate.?limit|insufficient_?quota|quota|billing|balance|欠费|额度|限流)/i.test(value)) {
+    return "model quota/rate limit（额度或限流）";
+  }
+  if (/(\b401\b|\b403\b|unauthor|invalid api key|authentication|not authorized|permission denied|forbidden)/i.test(value)) {
+    return "model auth/permission（鉴权或权限）";
+  }
+  if (/(ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up|network error)/i.test(value)) {
+    return "network error（网络）";
+  }
+  if (/(timed out|timeout)/i.test(value)) {
+    return "timeout（超时）";
+  }
+  return null;
 }
 
 async function writeEscalation(state, paths, reason, details) {
@@ -1193,6 +1237,13 @@ async function writeEscalation(state, paths, reason, details) {
   state.blocked.escalationPath = relativeTo(state.projectRoot, filePath);
   state.updatedAt = now();
   await writeJson(paths.state, state);
+  await appendTimeline(paths, timelineLine({
+    round: state.currentRound,
+    event: "blocked",
+    status: reason,
+    summary: details?.summary,
+    artifact: state.blocked.escalationPath,
+  }));
   return filePath;
 }
 
@@ -1229,6 +1280,43 @@ function blockedNotice(state, { summaryLimit = 700, questionLimit = 3, questionT
   return lines.join("\n");
 }
 
+function timelineFilePath(paths) {
+  return path.join(paths.reports, "timeline.md");
+}
+
+/**
+ * Append-only, human-readable log of the whole workflow: plan freeze →
+ * development rN → review rN → human decision / escalation → pass. Never
+ * rewritten, so interrupted and resumed runs stay in one chronological file
+ * (`reports/timeline.md`), while the per-role details live in handoffs/.
+ */
+async function appendTimeline(paths, lines) {
+  const entries = (Array.isArray(lines) ? lines : [lines]).filter(
+    (line) => typeof line === "string" && line.length > 0,
+  );
+  if (!entries.length) return;
+  try {
+    await mkdir(paths.reports, { recursive: true });
+    await appendFile(timelineFilePath(paths), `${entries.join("\n")}\n`, "utf8");
+  } catch {
+    // The timeline is a convenience artifact; never fail a run because of it.
+  }
+}
+
+function timelineLine({ round, event, status, summary, artifact }) {
+  const head = [
+    localNow(),
+    round ? `r${round}` : "workflow",
+    event,
+    status ? `**${status}**` : null,
+  ].filter(Boolean).join(" · ");
+  const tail = [
+    typeof summary === "string" && summary.trim() ? truncateText(summary, 400) : null,
+    artifact ? `\`${artifact}\`` : null,
+  ].filter(Boolean).join(" — ");
+  return `- ${head}${tail ? ` — ${tail}` : ""}`;
+}
+
 function stateStatus(state, paths) {
   const lines = [
     `Workflow: ${state.workflow?.key || state.workflowId}`,
@@ -1241,6 +1329,7 @@ function stateStatus(state, paths) {
     `Reviewer model: ${state.config.reviewerModel}`,
     `Open issues: ${state.openIssues.length ? state.openIssues.map((issue) => issue.id).join(", ") : "none"}`,
     `Artifacts: ${relativeTo(state.projectRoot, paths.root)}`,
+    `Timeline: ${relativeTo(state.projectRoot, timelineFilePath(paths))}`,
   ];
   if (state.status === "blocked" && state.blocked) {
     lines.push(blockedNotice(state));
@@ -1330,10 +1419,19 @@ async function initializeWorkflow(cwd, positionals, options) {
   });
   await writeJson(paths.state, state);
   await writeActiveWorkflow(projectRoot, paths, state);
+  await appendTimeline(paths, [
+    `# dev-review timeline · ${key}`,
+    "",
+    `- Plan: \`${relativeTo(projectRoot, planSource)}\` · sha256 \`${planHash.slice(0, 8)}…\``,
+    `- Base commit: \`${baseHead}\``,
+    `- Developer: \`${config.developerModel}\` · Reviewer: \`${config.reviewerModel}\` · Max rounds: ${config.maxReviewRounds}`,
+    `- Created: ${localNow()} (${localTimezoneLabel()})`,
+    "",
+  ]);
   return {
     state,
     paths,
-    message: `Initialized workflow ${key}. Run /dev-review run. Artifacts: ${relativeTo(projectRoot, paths.root)}`,
+    message: `Initialized workflow ${key}. Run /dev-review run. Artifacts: ${relativeTo(projectRoot, paths.root)} (timeline: ${relativeTo(projectRoot, timelineFilePath(paths))})`,
   };
 }
 
@@ -1428,7 +1526,7 @@ async function resolveWorkflow(cwd, positionals, options) {
     const lines = [
       "# Human decision (inline)",
       "",
-      `- **Generated:** ${now()}`,
+      `- **Generated:** ${localNow()}`,
       `- **Round:** ${state.currentRound}`,
       `- **Stop reason:** ${blocked.reason || "human-decision"}`,
       blocked.details?.summary ? `- **Coordinator summary:** ${details.summary}` : "",
@@ -1459,6 +1557,13 @@ async function resolveWorkflow(cwd, positionals, options) {
   state.updatedAt = now();
   await writeJson(paths.state, state);
   await writeActiveWorkflow(projectRoot, paths, state);
+  await appendTimeline(paths, timelineLine({
+    round: state.currentRound,
+    event: "human-decision",
+    status: inlineChoice ? truncateText(inlineChoice, 80) : "recorded",
+    summary: inlineNote || (positionals.length ? `Decision file: ${relativeTo(projectRoot, path.resolve(cwd, positionals[0]))}` : "Decision recorded."),
+    artifact: relativeTo(projectRoot, destination),
+  }));
   return {
     state,
     paths,
@@ -1482,6 +1587,12 @@ async function unlockWorkflow(cwd, positionals, options) {
   state.status = "ready";
   state.updatedAt = now();
   await writeJson(paths.state, state);
+  await appendTimeline(paths, timelineLine({
+    round: state.currentRound,
+    event: "unlock",
+    status: "ready",
+    summary: `Interrupted ${state.phase || "?"} phase released for retry: ${reason}`,
+  }));
   return {
     state,
     paths,
@@ -1648,6 +1759,13 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       artifactPath: relativeTo(projectRoot, reviewerMarkdownPath),
       markdown: reviewerMarkdownContent,
     });
+    await appendTimeline(paths, timelineLine({
+      round,
+      event: "review",
+      status: review.decision,
+      summary: review.summary,
+      artifact: relativeTo(projectRoot, reviewerMarkdownPath),
+    }));
     history.reviewerPath = relativeTo(projectRoot, reviewerMarkdownPath);
     history.decision = review.decision;
 
@@ -1671,6 +1789,13 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       const finalPath = path.join(paths.reports, "final-report.md");
       await writeText(finalPath, finalReportMarkdown(state));
       await writeJson(paths.state, state);
+      await appendTimeline(paths, timelineLine({
+        round,
+        event: "workflow",
+        status: "passed",
+        summary: "All open issues verified closed; independent review passed.",
+        artifact: relativeTo(projectRoot, finalPath),
+      }));
       return { state, paths, message: `Workflow passed after ${round} review round(s). Final report: ${relativeTo(projectRoot, finalPath)}` };
     }
 
@@ -1788,6 +1913,13 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       artifactPath: relativeTo(projectRoot, developerMarkdownPath),
       markdown: developerMarkdownContent,
     });
+    await appendTimeline(paths, timelineLine({
+      round,
+      event: "development",
+      status: developer.status,
+      summary: developer.summary,
+      artifact: relativeTo(projectRoot, developerMarkdownPath),
+    }));
 
     state.currentRound = round;
     state.pendingHumanDecisionPath = null;
@@ -1892,14 +2024,19 @@ ${result.message}`,
 export {
   DEFAULT_ARTIFACT_DIR,
   blockedNotice,
+  classifyAgentFailure,
   extractJsonObject,
   initializeWorkflow,
   adoptWorkflow,
+  localNow,
+  localTimezoneLabel,
   normalizeDeveloperReport,
   normalizeReviewerReport,
   planChangedSinceFrozen,
   runWorkflow,
   splitArguments,
+  timelineFilePath,
+  timelineLine,
   workflowPaths,
 };
 

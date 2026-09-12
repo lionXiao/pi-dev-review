@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — 2026-09-12
+
+- **统一时间线日志 `reports/timeline.md`**：每个工作流实例一份追加式时间线，按顺序记录「plan 冻结 → dev r1 → review r1 → 人工决策/升级 → dev r2 → … → pass/blocked」，每行含时间戳、轮次、事件、结果、摘要与产物相对路径；中断/续跑不清空。
+- **时间戳改本机时区**：timeline / handoff / escalation / final report / 决策文档的时间戳都按本机时区显示（timeline 头部标注时区，如 `Asia/Shanghai (UTC+08:00)`）；`state.json` 等机器状态仍保持 ISO/UTC，便于比较与恢复。
+- **子 agent 失败原因分类**：模型额度/限流、鉴权、网络、超时会被识别并在错误里标注 `[likely model quota/rate limit（额度或限流）]` 之类的前缀（原始 stderr 尾部仍保留），不再和协议错误长得一样；分类会随 escalation、blocked 唤醒消息、时间线一起呈现。
+- **时间线路径处处可见**：`/dev-review status` 与 `dev_review_status` 输出 `Timeline:` 行；底部/编辑器下方 widget 在 running/blocked/ready 时显示相对路径；停止唤醒消息也带时间线路径。
+- 新增 `timelineLine` / `timelineFilePath` / `localNow` / `classifyAgentFailure` 单测 + status 输出集成测试（28 用例）。
+
+## 0.5.1 — 2026-09-12
+
+- 文档修正：`/reload` 只能刷新扩展入口 `index.ts`；它 import 的本地 `.mjs` 模块被 Node ESM 缓存冻结在进程启动版本，改完这些模块必须**完全重启 pi**（known-issues 已重写，含报错样例 `(0, _disciplineRuntime.loadPolicy) is not a function`）。
+
 ## 0.5.0 — 2026-09-12
 
 - **blocked 不再只说 "blocked"**：引擎的停止返回值（`run` / `start` / 后台唤醒消息 / CLI）统一携带阻塞详情 —— reason 代码、摘要、决策问题与选项（`blockedNotice`）。主 agent 被唤醒时即可向用户解释为什么停、要决定什么，不用再先跑一轮 `dev_review_status`。

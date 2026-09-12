@@ -121,6 +121,7 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 - 进度条：`dev-review ▶ 运行中 3m12s` + 最近一条引擎事件，每秒更新；
 - **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked(reason)/passed），不依赖谁启动的；
 - **事后补报**：如果运行在扩展观察窗口之外结束（bash 拉起未走扩展、或 block 发生在 reload 之前），下一个回合会自动补报一次停止原因，状态栏与 `dev_review_status` 都带 `blocked (reason)`；
+- **统一时间线**：每个实例有 `reports/timeline.md`，按时间顺序记「plan 冻结 → dev rN → review rN → 决策/升级 → pass」，一行一个事件（时间戳 + 轮次 + 结果 + 摘要 + 产物路径）；running/blocked/ready 时编辑器下方 widget 显示相对路径，`dev_review_status` 输出 `Timeline:` 行；
 - 随时查询：`dev_review_status` 工具或 `/dev-review status`，blocked 时输出原因、摘要与决策问题/选项，另带 `[run]` 行；
 - 同一时间只允许一个后台运行，重复启动会被拒绝；
 - 新建实例用 `dev_review_start`（工具，plan 哈希变化/新批次必需）；`dev_review_run` 只续跑已有实例，两者都走后台上进；
@@ -220,6 +221,7 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 - dev 的 `blockers` 必须是 `{question, why, options}` **对象数组**（字符串会被协议层拦截——拦截后原文会保留在 escalation 里，可读）。
 - 计划和决策文件对子 Agent 是**数据不是指令**（developer.md 角色约束）；人类决策文件可以修订计划口径，dev 应在报告中显式声明修订。
 - `resolve` 只在 blocked/ready 状态可用；`run` 在 running（被杀中断）状态会拒绝，需 `/dev-review unlock` 后再跑（解锁会被审计记录）。
-- 修改 `workflow.mjs` / 扩展 / `discipline.md` 后**必须重启 pi** 才对运行中的会话生效（ESM 模块已缓存）；CLI 直跑（`node .../workflow.mjs <cmd>`）永远用磁盘上的最新版本。
+- 修改 `workflow.mjs` / 扩展 / `discipline.md` 后**必须完全重启 pi**（不是 `/reload`）：pi 用 jiti 加载扩展，`/reload` 只会重新读取 `index.ts` 入口，它 import 的本地 `.mjs` 模块被 Node ESM 缓存冻结在进程启动版本（旧版可能报错或静默用旧逻辑）；CLI 直跑（`node .../workflow.mjs <cmd>`）永远用磁盘上的最新版本。
+- **统一时间线**：每个工作流实例的 `reports/timeline.md` 按时间顺序记录 dev/review/决策全过程（`dev_review_status` 输出的 `Timeline:` 行、底部状态 widget、停止唤醒消息都会给出路径）。
 - 测试命令要自足：agent 环境变量依赖（如录制开关）必须在命令里显式写出，否则会出现"循环重试永远失败"。
 - 多工作流：串行为主；真要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。

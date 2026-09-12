@@ -291,7 +291,7 @@ export default function (pi: any) {
   const RUN_STATUS_KEY = "dev-review-run";
   const RUN_WIDGET_KEY = "dev-review-run";
   const EXTERNAL_POLL_MS = Number(process.env.DEV_REVIEW_POLL_MS || 10000);
-  let backgroundRun: { startedAt: number; lastMessage: string; timer: ReturnType<typeof setInterval> | null } | null = null;
+  let backgroundRun: { startedAt: number; lastMessage: string; timelinePath?: string; timer: ReturnType<typeof setInterval> | null } | null = null;
   let externalRun: { timer: ReturnType<typeof setInterval>; startedAt: number } | null = null;
   // Last terminal state (blocked/passed) this session has already told the main
   // agent about; prevents repeating the wake-up message on every user turn.
@@ -341,6 +341,7 @@ export default function (pi: any) {
       });
     });
     if (questions.length > 2) lines.push(`（还有 ${questions.length - 2} 个决策问题，见 dev_review_status 或决策文件）`);
+    if (workflow?.timelinePath) lines.push(`时间线：${workflow.timelinePath}（按顺序记录 dev/review/决策全过程）`);
     lines.push("请把阻塞原因、需要用户决定什么转述给用户，并说明下一步。");
     return lines.join("\n");
   };
@@ -358,11 +359,24 @@ export default function (pi: any) {
         [
           `dev-review ▶ 运行中 ${clock}`,
           backgroundRun.lastMessage || "启动中…",
-          "输入不会被阻塞 · 详情用 dev_review_status",
+          backgroundRun.timelinePath ? `日志：${backgroundRun.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
         ],
         { placement: "belowEditor" },
       );
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${clock}`);
+    } catch {}
+  };
+
+  // The engine writes the workflow state (and thus the timeline path) a moment
+  // after a managed run starts; pick it up and surface it in the widget.
+  const refreshRunTimelinePath = async (ctx: any) => {
+    if (!backgroundRun || backgroundRun.timelinePath) return;
+    try {
+      const workflow = await readWorkflowState(findProjectRoot(ctx?.cwd || process.cwd()));
+      if (workflow.found && workflow.timelinePath) {
+        backgroundRun.timelinePath = workflow.timelinePath;
+        renderRunWidget(ctx);
+      }
     } catch {}
   };
 
@@ -385,7 +399,7 @@ export default function (pi: any) {
         [
           `dev-review ▶ 运行中 · r${round}（外部启动）`,
           `最近引擎更新：${agoLabel(workflow?.updatedAt)}`,
-          "输入不会被阻塞 · 详情用 dev_review_status",
+          workflow?.timelinePath ? `日志：${workflow.timelinePath}` : "输入不会被阻塞 · 详情用 dev_review_status",
         ],
         { placement: "belowEditor" },
       );
@@ -447,8 +461,18 @@ export default function (pi: any) {
     try {
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, label ? `dev-review: ${label}` : undefined);
     } catch {}
+    // Keep the path of the unified timeline visible while the workflow is in a
+    // state where the user may want to inspect it (blocked / ready).
     try {
-      ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
+      if (workflow?.found && workflow.timelinePath && (status === "blocked" || status === "ready")) {
+        ctx?.ui?.setWidget?.(
+          RUN_WIDGET_KEY,
+          [`dev-review ${label || status}`, `日志：${workflow.timelinePath}`],
+          { placement: "belowEditor" },
+        );
+      } else {
+        ctx?.ui?.setWidget?.(RUN_WIDGET_KEY, undefined);
+      }
     } catch {}
 
     const key = terminalStateKey(status, workflow?.key, workflow?.updatedAt);
@@ -499,7 +523,10 @@ export default function (pi: any) {
       backgroundRun.lastMessage = String(message).replace(/\s+/g, " ").trim().slice(0, 120) || "…";
       renderRunWidget(ctx);
     };
-    backgroundRun.timer = setInterval(() => renderRunWidget(ctx), 1000);
+    backgroundRun.timer = setInterval(() => {
+      void refreshRunTimelinePath(ctx);
+      renderRunWidget(ctx);
+    }, 1000);
     renderRunWidget(ctx);
     void runCommand({
       args,

@@ -47,4 +47,5 @@ if [ ! -f "$TARGET_ROOT/dev-review/local.json" ]; then
 fi
 printf 'Verify:  start pi and run /dev-review help\n'
 printf 'Tests:   node --test %s/dev-review/tests/*.test.mjs\n' "$TARGET_ROOT"
-printf 'Restart pi (or /reload) after installing for changes to take effect.\n'
+printf 'Restart pi fully (quit and relaunch) after installing for changes to take effect.\n'
+printf '  (/reload only refreshes the extension entry index.ts; its imported .mjs modules stay cached from process start.)\n'
