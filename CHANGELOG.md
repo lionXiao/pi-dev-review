@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 — 2026-09-12
+
+- **`start`/`init` 的 plan 路径兜底**：cwd 相对路径找不到、但同一路径相对仓库根存在时，自动按仓库根解析并在结果里注明；错误信息同时列出两个解析结果。真实事故：会话 cwd 是 `<repo>/docs/prd`，却传了仓库根相对路径 `docs/prd/v1.2-refactor-plan.md`，拼成双层目录直接失败（批 3 启动失败但主 agent 会误汇报成旧实例）。
+- 新增 `resolvePlanSource` 单测（29 用例）。
+
 ## 0.6.0 — 2026-09-12
 
 - **统一时间线日志 `reports/timeline.md`**：每个工作流实例一份追加式时间线，按顺序记录「plan 冻结 → dev r1 → review r1 → 人工决策/升级 → dev r2 → … → pass/blocked」，每行含时间戳、轮次、事件、结果、摘要与产物相对路径；中断/续跑不清空。

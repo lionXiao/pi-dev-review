@@ -1368,11 +1368,31 @@ function mergeConfig(state, options, { requireModels = false, defaults = {} } = 
   };
 }
 
+/**
+ * Resolve the plan path for init/start. Paths are normally relative to the
+ * current directory, but launching from a deep subdirectory with a repo-root
+ * relative path is a common slip (`<repo>/docs/prd` + `docs/prd/plan.md` →
+ * `<repo>/docs/prd/docs/prd/plan.md`). If the cwd resolution is missing but the
+ * repo-root resolution exists, fall back and say so.
+ */
+function resolvePlanSource(cwd, planArg, projectRoot) {
+  const fromCwd = path.resolve(cwd, planArg);
+  if (existsSync(fromCwd)) return { planSource: fromCwd, note: null };
+  const fromRoot = projectRoot ? path.resolve(projectRoot, planArg) : null;
+  if (fromRoot && fromRoot !== fromCwd && existsSync(fromRoot)) {
+    return {
+      planSource: fromRoot,
+      note: `Plan path '${planArg}' was not found from cwd ${cwd}; resolved it against the repository root instead: ${fromRoot}`,
+    };
+  }
+  const tried = fromRoot && fromRoot !== fromCwd ? `; also tried ${fromRoot}` : "";
+  throw new Error(`Plan file does not exist: ${fromCwd} (resolved from cwd ${cwd}${tried})`);
+}
+
 async function initializeWorkflow(cwd, positionals, options) {
   if (positionals.length !== 1) throw new Error("init requires exactly one plan path");
   const projectRoot = gitRoot(cwd);
-  const planSource = path.resolve(cwd, positionals[0]);
-  if (!existsSync(planSource)) throw new Error(`Plan file does not exist: ${planSource}`);
+  const { planSource, note: planPathNote } = resolvePlanSource(cwd, positionals[0], projectRoot);
   const planContents = await readFile(planSource);
   const dirty = gitStatus(projectRoot);
   if (dirty && !options.allowDirty) {
@@ -1431,7 +1451,7 @@ async function initializeWorkflow(cwd, positionals, options) {
   return {
     state,
     paths,
-    message: `Initialized workflow ${key}. Run /dev-review run. Artifacts: ${relativeTo(projectRoot, paths.root)} (timeline: ${relativeTo(projectRoot, timelineFilePath(paths))})`,
+    message: `Initialized workflow ${key}. Run /dev-review run. Artifacts: ${relativeTo(projectRoot, paths.root)} (timeline: ${relativeTo(projectRoot, timelineFilePath(paths))})${planPathNote ? `\nNote: ${planPathNote}` : ""}`,
   };
 }
 
@@ -2033,6 +2053,7 @@ export {
   normalizeDeveloperReport,
   normalizeReviewerReport,
   planChangedSinceFrozen,
+  resolvePlanSource,
   runWorkflow,
   splitArguments,
   timelineFilePath,
