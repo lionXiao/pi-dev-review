@@ -30,9 +30,26 @@ test("formatTokenCount / usageLine: pi-style summary with cache hit rate, speed 
   const entry = usageEntry({ role: "developer", round: 2, stats });
   assert.equal(entry.requests, 1);
   assert.equal(entry.ttftAvgMs, 800);
+  assert.equal(entry.setupAvgMs, null);
   assert.equal(entry.outputPerSec, 1000);
   assert.equal(entry.cacheHitRate, 0.99);
   assert.equal(entry.line, line);
+});
+
+test("usageLine/usageEntry: standard client-side TTFT plus the pre-stream setup breakdown", () => {
+  const stats = createUsageStats();
+  addUsageRequest(stats, {
+    requestAt: 200, // child stamped the request just before provider fetch
+    startAt: 1000, // SSE response headers received
+    firstDeltaAt: 1800, // first streamed token
+    endAt: 3800,
+    usage: { input: 100, output: 200, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 300 },
+  });
+  const line = usageLine(stats);
+  assert.match(line, /TTFT 1\.60s \(setup 0\.80s\)/);
+  const entry = usageEntry({ role: "developer", round: 1, stats });
+  assert.equal(entry.ttftAvgMs, 1600);
+  assert.equal(entry.setupAvgMs, 800);
 });
 
 test("usageLine: no cache reporting and no timing degrades gracefully", () => {
@@ -67,7 +84,7 @@ const usage = developer
   ? { input: 1000, output: 2000, cacheRead: 50000, cacheWrite: 0, reasoning: 500, totalTokens: 53000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
   : { input: 500, output: 1000, cacheRead: 80000, cacheWrite: 100, reasoning: 200, totalTokens: 81600, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const write = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
-write({ type: "message_start", message: { role: "assistant", content: [] } });
+write({ type: "message_start", message: { role: "assistant", content: [], timestamp: Date.now() - 500 } });
 await new Promise((resolve) => setTimeout(resolve, 30));
 write({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" }, usage: {} });
 await new Promise((resolve) => setTimeout(resolve, 60));
@@ -109,7 +126,9 @@ test("usage tracking: engine writes reports/usage.json, timeline and status line
     assert.equal(dev.output, 2000);
     assert.equal(dev.cacheRead, 50000);
     assert.equal(dev.cacheHitRate, 0.9804);
-    assert.ok(dev.ttftAvgMs >= 20, `ttft ${dev.ttftAvgMs}`);
+    assert.ok(dev.ttftAvgMs >= 500, `standard ttft ${dev.ttftAvgMs}`);
+    assert.ok(dev.setupAvgMs >= 450, `setup ${dev.setupAvgMs}`);
+    assert.ok(dev.line.includes("TTFT") && dev.line.includes("(setup "), dev.line);
     assert.ok(dev.outputPerSec > 0);
     assert.ok(dev.line.includes("CH 98.0%"));
     assert.ok(dev.line.includes("TTFT"));

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.2 — 2026-09-12
+
+- **TTFT 修正为标准客户端口径**：旧实现从子进程 `message_start`（SSE 响应头到达）起算，漏掉「请求发出 → 响应头」的建连/上传/网关排队段，系统性偏快——实测同一请求旧口径 0.69s，真实首字 1.56s（漏 56%）；b3 r6 的 19 次请求同理。现在改用 pi 在 `message_start.message.timestamp` 里盖的「发请求前」时间戳：`TTFT = 首个内容 token − 请求发出`，含连接、请求上传、网关排队与 prefill，与业界 TTFT 定义一致。
+- token 行新增 `(setup X)`：请求发出 → SSE 响应头的准备段（建连/上传/排队），用于分辨「网络/网关慢」还是「模型慢」，例如 `TTFT 1.56s (setup 0.87s) · 274.2 tok/s`；`reports/usage.json` 同步新增 `setupAvgMs`。
+- 无 `message.timestamp` 的 provider / 旧子进程自动回退旧口径（从响应头起算）并省略 setup 段；`tok/s` 口径不变（首 token → 结束的解码段，含 reasoning）。
+
+## 0.9.1 — 2026-09-12
+
+- **修复协议性停机的两个诊断 bug**（真实事故：b3 工作流 r4，dev 交卷里 `"cmd1" + "cmd2"` 非法 JSON，引擎却报成 `developer.status must be one of: done, blocked`）：
+  - `extractJsonObject` 不再在「外层对象语法错」时静默降级到嵌套子对象。若选中的可解析片段被一个解析失败（或未闭合）的更大片段包着，直接抛 `Agent returned malformed JSON: … (line/col) … Near: …`，并附出错位置附近的原文；截断输出报 `unterminated JSON object`。纯 prose 夹合法 JSON 的宽松解析保持不变。
+  - 协议错误 catch 块里的 `output` 作用域修复（原先 `const output` 在 try 内，catch 引用必抛 `ReferenceError` 且被空 catch 吞掉，导致设计好的 raw report/blocker 回捞从未生效）。
+  - 无论能否解析，dev/reviewer 的最终原文都会落盘到 `handoffs/<role>-rNN.raw.txt` 并写进 escalation（新增「Raw agent output (verbatim)」小节），不再需要翻私有 session。
+- 新增 `protocol-recovery` 单测（malformed 外层 + 嵌套合法片段、截断对象、schema 错但仍可回捞、两个 run 级端到端断言）。
+
 ## 0.9.0 — 2026-09-12
 
 - **子 agent token 使用追踪**：引擎从子进程 `--mode json` 事件流统计每个 dev/review 轮的 token（↑input ↓output · RcacheRead / WcacheWrite · think）与性能（流式 tok/s、请求平均 TTFT）；缓存命中率公式与 pi 主状态栏一致：`cacheRead / (input + cacheRead + cacheWrite)`。

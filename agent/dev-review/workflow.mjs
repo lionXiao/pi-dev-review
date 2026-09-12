@@ -472,6 +472,15 @@ async function writeText(filePath, value) {
   await rename(temporary, filePath);
 }
 
+// Preserve the child agent's final message verbatim when a protocol error stops the
+// loop, so the human can see what it actually said even when the JSON cannot parse.
+async function writeProtocolRawText(paths, role, round, finalText) {
+  if (typeof finalText !== "string" || !finalText) return null;
+  const filePath = path.join(paths.handoffs, `${role}-r${String(round).padStart(2, "0")}.raw.txt`);
+  await writeText(filePath, finalText);
+  return filePath;
+}
+
 async function readJson(filePath) {
   let parsed;
   try {
@@ -921,7 +930,7 @@ ${recent.developerPath ? `- **Latest development handoff:** ${markdownCode(recen
 ## Why the automated loop stopped
 
 ${details.summary || "The coordinator stopped the workflow for a human decision."}
-${details.rawReport ? `\n## Developer report (recovered)\n\n${rawReportMarkdown(details.rawReport)}\n` : ""}
+${details.rawReport ? `\n## Developer report (recovered)\n\n${rawReportMarkdown(details.rawReport)}\n` : ""}${details.rawTextPath ? `\n## Raw agent output (verbatim)\n\nThe agent's final message was saved unchanged at ${markdownCode(details.rawTextPath)}.\n` : ""}
 
 ## Open issues
 
@@ -1064,13 +1073,31 @@ function messageText(message) {
   }).join("");
 }
 
+function excerptAround(text, position, radius = 90) {
+  const from = Math.max(0, Math.min(text.length, position - radius));
+  const to = Math.max(0, Math.min(text.length, position + radius));
+  return `…${text.slice(from, to).replace(/\s+/g, " ").trim()}…`;
+}
+
+function malformedJsonMessage(span, text) {
+  if (span.unterminated) {
+    return `Agent output contains an unterminated JSON object starting at offset ${span.start} (a '{' is never closed, so the response may be truncated). Near: ${excerptAround(text, span.start)}`;
+  }
+  const detail = span.error?.message || "invalid JSON syntax";
+  const match = /at position (\d+)/.exec(detail);
+  const focus = match ? span.start + Number(match[1]) : span.start;
+  return `Agent returned malformed JSON: ${detail}. Re-emit exactly one well-formed JSON object (no prose, no '+' string concatenation, no trailing commas). Near: ${excerptAround(text, focus)}`;
+}
+
 function extractJsonObject(text) {
-  const candidates = [];
+  const parsed = [];
+  const broken = [];
   for (let start = 0; start < text.length; start += 1) {
     if (text[start] !== "{") continue;
     let depth = 0;
     let inString = false;
     let escaped = false;
+    let closedAt = -1;
     for (let index = start; index < text.length; index += 1) {
       const character = text[index];
       if (inString) {
@@ -1087,21 +1114,37 @@ function extractJsonObject(text) {
       if (character === "}") {
         depth -= 1;
         if (depth === 0) {
-          const candidate = text.slice(start, index + 1);
-          try {
-            candidates.push({ value: JSON.parse(candidate), length: candidate.length });
-          } catch {
-            // Keep scanning: prose may contain JSON-looking fragments.
-          }
+          closedAt = index;
           break;
         }
       }
     }
+    if (closedAt < 0) {
+      broken.push({ start, end: text.length, source: text.slice(start), unterminated: true });
+      continue;
+    }
+    const source = text.slice(start, closedAt + 1);
+    try {
+      parsed.push({ start, end: closedAt + 1, source, value: JSON.parse(source) });
+    } catch (error) {
+      broken.push({ start, end: closedAt + 1, source, error });
+    }
   }
-  if (candidates.length === 0) {
+  const broadest = (spans) => spans.slice().sort((left, right) => right.source.length - left.source.length)[0];
+  if (parsed.length === 0) {
+    if (broken.length) throw new Error(malformedJsonMessage(broadest(broken), text));
     throw new Error(`Agent did not return a JSON object. Final output excerpt: ${text.slice(0, 500)}`);
   }
-  return candidates.sort((left, right) => right.length - left.length)[0].value;
+  const best = broadest(parsed);
+  // A parseable fragment nested inside a larger span that failed to parse means the
+  // agent tried to send one big JSON object and broke its syntax. Returning that
+  // fragment would surface a misleading schema error ("status must be one of ...")
+  // instead of the real syntax problem, so fail with the enclosing span's error.
+  const enclosing = broken
+    .filter((span) => span.start < best.start && span.end >= best.end)
+    .sort((left, right) => left.source.length - right.source.length)[0];
+  if (enclosing) throw new Error(malformedJsonMessage(enclosing, text));
+  return best.value;
 }
 
 function standalonePiInvocation() {
@@ -1178,7 +1221,16 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
         return;
       }
       if (event.type === "message_start" && event.message?.role === "assistant") {
-        request = { startAt: Date.now(), firstDeltaAt: null, endAt: null, usage: null };
+        // message.timestamp is stamped by pi just before it sends the provider
+        // request; use it as the TTFT origin. Missing on some providers → fall back.
+        const requestAt = Number(event.message?.timestamp);
+        request = {
+          startAt: Date.now(),
+          requestAt: Number.isFinite(requestAt) ? requestAt : null,
+          firstDeltaAt: null,
+          endAt: null,
+          usage: null,
+        };
         return;
       }
       if (event.type === "message_update" && request && !request.firstDeltaAt) {
@@ -1285,6 +1337,14 @@ function truncateText(value, max) {
 // (authoritative usage: input/output/cacheRead/cacheWrite/reasoning).
 // Cache hit rate uses the same formula as pi's own status bar:
 //   cacheRead / (input + cacheRead + cacheWrite).
+// Timing:
+//   - The assistant message_start carries `message.timestamp`, stamped by the
+//     child just before it issues the provider request. TTFT is measured from
+//     that point to the first streamed token — the standard client-side
+//     definition (connection, request upload, gateway queue and prefill included).
+//   - The parent stamps `startAt` when it receives message_start (SSE response
+//     headers). The requestAt → startAt gap is reported separately as `setup`.
+//   - `outputPerSec` stays decode-only: first delta → message_end.
 
 function formatTokenCount(value) {
   const n = Number(value) || 0;
@@ -1304,6 +1364,8 @@ function createUsageStats() {
     totalTokens: 0,
     ttftMs: 0,
     ttftSamples: 0,
+    setupMs: 0,
+    setupSamples: 0,
     outputMs: 0,
     latest: null,
     updatedAt: null,
@@ -1318,7 +1380,18 @@ function addUsageRequest(stats, request) {
   for (const key of ["input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens"]) {
     stats[key] += Number(usage[key]) || 0;
   }
-  if (request.startAt && request.firstDeltaAt) {
+  if (request.requestAt && request.firstDeltaAt) {
+    // Standard client-side TTFT: provider request sent → first token streamed.
+    stats.ttftMs += Math.max(0, request.firstDeltaAt - request.requestAt);
+    stats.ttftSamples += 1;
+    if (request.startAt) {
+      // requestAt → SSE headers: connect, upload, gateway queue (pre-stream setup).
+      stats.setupMs += Math.max(0, request.startAt - request.requestAt);
+      stats.setupSamples += 1;
+    }
+  } else if (request.startAt && request.firstDeltaAt) {
+    // Providers that do not stamp the request (or older child pi builds): fall
+    // back to stream-open → first token so a number is still reported.
     stats.ttftMs += Math.max(0, request.firstDeltaAt - request.startAt);
     stats.ttftSamples += 1;
   }
@@ -1345,7 +1418,9 @@ function usageLine(stats) {
     ? `R${formatTokenCount(stats.cacheRead)}${stats.cacheWrite ? ` W${formatTokenCount(stats.cacheWrite)}` : ""}${prompt > 0 ? ` (CH ${((stats.cacheRead / prompt) * 100).toFixed(1)}%)` : ""}`
     : null;
   const speed = stats.outputMs > 0 ? `${(stats.output / (stats.outputMs / 1000)).toFixed(1)} tok/s` : null;
-  const ttft = stats.ttftSamples > 0 ? `TTFT ${(stats.ttftMs / stats.ttftSamples / 1000).toFixed(2)}s` : null;
+  const ttft = stats.ttftSamples > 0
+    ? `TTFT ${(stats.ttftMs / stats.ttftSamples / 1000).toFixed(2)}s${stats.setupSamples > 0 ? ` (setup ${(stats.setupMs / stats.setupSamples / 1000).toFixed(2)}s)` : ""}`
+    : null;
   return [
     `tokens ↑${formatTokenCount(stats.input)} ↓${formatTokenCount(stats.output)}`,
     cache,
@@ -1370,6 +1445,7 @@ function usageEntry({ role, round, stats }) {
     reasoning: stats.reasoning,
     totalTokens: stats.totalTokens,
     ttftAvgMs: stats.ttftSamples ? Math.round(stats.ttftMs / stats.ttftSamples) : null,
+    setupAvgMs: stats.setupSamples ? Math.round(stats.setupMs / stats.setupSamples) : null,
     outputPerSec: stats.outputMs > 0 ? Number((stats.output / (stats.outputMs / 1000)).toFixed(1)) : null,
     cacheHitRate: prompt > 0 && (stats.cacheRead > 0 || stats.cacheWrite > 0)
       ? Number((stats.cacheRead / prompt).toFixed(4))
@@ -1915,9 +1991,10 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     let review;
     let reviewerBefore;
     let reviewerUsage = null;
+    let reviewerOutput = null;
     try {
       reviewerBefore = await repositoryFingerprint(projectRoot);
-      const output = await invokeAgent({
+      reviewerOutput = await invokeAgent({
         role: "reviewer",
         state,
         paths,
@@ -1927,15 +2004,17 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         notify,
         onStats,
       });
-      reviewerUsage = output.usage?.line || null;
+      reviewerUsage = reviewerOutput.usage?.line || null;
       const reviewerAfter = await repositoryFingerprint(projectRoot);
       if (reviewerBefore !== reviewerAfter) {
         throw new Error("Reviewer changed the repository. Reviewers are read-only; inspect and revert/unblock this manually.");
       }
-      review = normalizeReviewerReport(extractJsonObject(output.finalText), round, state.openIssues);
+      review = normalizeReviewerReport(extractJsonObject(reviewerOutput.finalText), round, state.openIssues);
     } catch (error) {
+      const rawTextPath = await writeProtocolRawText(paths, "reviewer", round, reviewerOutput?.finalText);
       await escalate("reviewer-protocol-or-execution-error", {
         summary: error.message,
+        ...(rawTextPath ? { rawTextPath: relativeTo(projectRoot, rawTextPath) } : {}),
       });
       return { state, paths, message: `Review requires human attention.\n${blockedNotice(state)}` };
     }
@@ -2075,8 +2154,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     const humanDecisionPath = state.pendingHumanDecisionPath;
     let developer;
     let developerUsage = null;
+    let developerOutput = null;
     try {
-      const output = await invokeAgent({
+      developerOutput = await invokeAgent({
         role: "developer",
         state,
         paths,
@@ -2086,15 +2166,16 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         notify,
         onStats,
       });
-      developerUsage = output.usage?.line || null;
-      developer = normalizeDeveloperReport(extractJsonObject(output.finalText));
+      developerUsage = developerOutput.usage?.line || null;
+      developer = normalizeDeveloperReport(extractJsonObject(developerOutput.finalText));
     } catch (error) {
       state.currentRound = round;
       // Surface the developer's actual report/questions in the escalation when the
       // failure is a protocol-validation error (the agent did answer, just malformed).
+      const finalText = typeof developerOutput?.finalText === "string" ? developerOutput.finalText : "";
       let rawReport = null;
       try {
-        rawReport = extractJsonObject(output.finalText);
+        rawReport = extractJsonObject(finalText);
       } catch {}
       const devSummary = rawReport && typeof rawReport.summary === "string" ? rawReport.summary : "";
       const firstBlocker = Array.isArray(rawReport?.blockers) && rawReport.blockers.length
@@ -2105,9 +2186,11 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         devSummary && `Developer: ${devSummary}`,
         firstBlocker && `Question: ${firstBlocker}`,
       ].filter(Boolean).join(" — ");
+      const rawTextPath = await writeProtocolRawText(paths, "developer", round, finalText);
       await escalate("developer-protocol-or-execution-error", {
         summary,
         ...(rawReport ? { rawReport: JSON.stringify(rawReport, null, 2) } : {}),
+        ...(rawTextPath ? { rawTextPath: relativeTo(projectRoot, rawTextPath) } : {}),
       });
       return { state, paths, message: `Developer run stopped for human attention.\n${blockedNotice(state)}` };
     }
