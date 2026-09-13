@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 — 2026-09-13
+
+- **新增夜跑批处理协议**（`nightly-batch.md`，纯文档 + 部署，不改引擎）：支持「睡前排好多个 plan，一夜串行跑完，早上一次汇总」的用法。协议固化了用户 2026-09-13 定的规则：blocked 先分析——能交给工作流验证的继续验证，验证不了就跳过；同一 plan 内没写完的部分同样跳过并标记；全程不中途找用户，最后一起汇总。
+  - 预授权边界：技术/事实/验证类与协议类故障可代决策（note 必须写「夜间预授权，无人工当场确认」留痕）；产品口径/范围/设计取舍一律跳过。
+  - git 卫生：夜跑在 `nightly/<date>` 分支；pass 的成果提交在夜跑分支上顺序叠加，skip/blocked 的 WIP 提交到 `nightly/<date>-<key>` 停放分支后把夜跑分支 reset 回上一个好 commit，保证后续 plan 从干净、可构建的基础开工。
+  - 预算熔断：每份 plan 自动 resolve ≤ 2 次；超过 cutoff（默认 07:00）停止队列并写夜报；夜报固定三栏「已完成/未完成/阻塞点」+ 早上的收尾流程。
+
 ## 0.9.3 — 2026-09-13
 
 - **修复托管运行 widget 的角色行跨轮冻结**（真实事故：b1b 工作流 review r1 判 fix_required、dev 已进入 r2，widget 顶行仍显示 `dev r1 · opencode-go/deepseek-flash · thinking max`，而实时「最近」行已是 `[dev r2] …`，usage 行也是 r2 的数字）。根因：`refreshRunWorkflow` 首次读到 state 后用 `timelinePath && roleLine` 做了「已初始化」闩锁，之后每秒 tick 直接 return——role/model 行（包括 review 轮的 reviewer 模型）永远停在启动那一刻的 phase/round，review r1 期间也会错标成 dev r1。现在每 tick 重读 state，仅在内容变化时重绘；「最近」行与 usage 行行为不变（过渡瞬间 usage 行仍会短暂保留上一轮数字，直到新一轮首个请求完成）。
