@@ -428,12 +428,13 @@ export default function (pi: any) {
     } catch {}
   };
 
-  // The engine writes the workflow state (and thus the timeline path plus the
-  // active role/model) a moment after a managed run starts; pick it up and
-  // surface it in the widget.
+  // The engine writes the workflow state (timeline path, active phase/round,
+  // role/model) a moment after a managed run starts, and rewrites it on every
+  // phase transition (dev rN -> review rN -> dev rN+1). Re-read it every tick so
+  // the header follows the round actually running instead of freezing on the
+  // one that happened to be active at startup; render only when it changes.
   const refreshRunWorkflow = async (ctx: any) => {
     if (!backgroundRun) return;
-    if (backgroundRun.timelinePath && backgroundRun.roleLine) return;
     try {
       const workflow = await readWorkflowState(findProjectRoot(ctx?.cwd || process.cwd()));
       if (!workflow.found) return;

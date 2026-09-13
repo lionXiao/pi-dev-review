@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3 — 2026-09-13
+
+- **修复托管运行 widget 的角色行跨轮冻结**（真实事故：b1b 工作流 review r1 判 fix_required、dev 已进入 r2，widget 顶行仍显示 `dev r1 · opencode-go/deepseek-flash · thinking max`，而实时「最近」行已是 `[dev r2] …`，usage 行也是 r2 的数字）。根因：`refreshRunWorkflow` 首次读到 state 后用 `timelinePath && roleLine` 做了「已初始化」闩锁，之后每秒 tick 直接 return——role/model 行（包括 review 轮的 reviewer 模型）永远停在启动那一刻的 phase/round，review r1 期间也会错标成 dev r1。现在每 tick 重读 state，仅在内容变化时重绘；「最近」行与 usage 行行为不变（过渡瞬间 usage 行仍会短暂保留上一轮数字，直到新一轮首个请求完成）。
+
 ## 0.9.2 — 2026-09-12
 
 - **TTFT 修正为标准客户端口径**：旧实现从子进程 `message_start`（SSE 响应头到达）起算，漏掉「请求发出 → 响应头」的建连/上传/网关排队段，系统性偏快——实测同一请求旧口径 0.69s，真实首字 1.56s（漏 56%）；b3 r6 的 19 次请求同理。现在改用 pi 在 `message_start.message.timestamp` 里盖的「发请求前」时间戳：`TTFT = 首个内容 token − 请求发出`，含连接、请求上传、网关排队与 prefill，与业界 TTFT 定义一致。
