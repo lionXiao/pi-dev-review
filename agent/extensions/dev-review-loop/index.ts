@@ -559,6 +559,19 @@ export default function (pi: any) {
     return stopNoticeText(workflow, label || status);
   };
 
+  // An unattended batch (protocol: dev-review/unattended.md) keeps a queue file
+  // in place while it runs. When it exists, a stopped run must be handled by the
+  // batch rules (analyze -> verify-or-skip -> commit -> next plan) instead of
+  // asking the user to triage mid-batch.
+  const inUnattendedBatch = (ctx: any) => {
+    try {
+      const root = findProjectRoot(ctx?.cwd || process.cwd());
+      return Boolean(root) && existsSync(join(root, ".ai-dev-review", "unattended-queue.md"));
+    } catch {
+      return false;
+    }
+  };
+
   const finishBackgroundRun = (ctx: any, result: { ok?: boolean; message?: string }) => {
     const message = result?.message || "dev-review 运行结束（无消息）";
     if (backgroundRun?.timer) clearInterval(backgroundRun.timer);
@@ -575,7 +588,15 @@ export default function (pi: any) {
       ctx?.ui?.setStatus?.(RUN_STATUS_KEY, `dev-review: ${summarizeRunStatus(message)}`);
     } catch {}
     workflowNotify(message);
-    const text = `[dev-review] 后台运行结束：${message}\n请把阻塞原因、需要用户决定什么转述给用户（完整决策问题与选项见 dev_review_status 或决策文件），并说明下一步。`;
+    const text = inUnattendedBatch(ctx)
+      ? [
+          `[dev-review] 后台运行结束：${message}`,
+          "【无人值守批跑】队列进行中（.ai-dev-review/unattended-queue.md）：按 ~/.pi/agent/dev-review/unattended.md 处理，不要等待或打扰用户。",
+          "1) 先分析本次停机：能验证或可继续的 → dev_review_resolve（note 写明「无人值守预授权」，参见协议 §1）+ dev_review_run 继续；验证不了或需人拍板的 → 跳过（不 resolve），记入值守报告。",
+          "2) 该 plan 收尾：工作树 commit 到无人值守分支，message 末尾带「遗留:」清单；跳过/blocked 的 WIP 先 park 到 unattended/<日期>-<key>，再把无人值守分支 reset 回上一个好 commit（保证下一份从干净树开工）。",
+          "3) 启动队列下一项；队列全部跑完后写值守报告（.ai-dev-review/unattended-<日期>.md）并汇总，含每个 commit 的遗留项。",
+        ].join("\n")
+      : `[dev-review] 后台运行结束：${message}\n请把阻塞原因、需要用户决定什么转述给用户（完整决策问题与选项见 dev_review_status 或决策文件），并说明下一步。`;
     try {
       if (ctx?.isIdle?.() === false) pi.sendUserMessage(text, { deliverAs: "followUp" });
       else pi.sendUserMessage(text);

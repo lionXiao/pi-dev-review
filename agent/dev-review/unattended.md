@@ -1,8 +1,17 @@
 # 无人值守批处理协议（Unattended Batch）
 
 > 触发：用户说「无人值守」并给出队列文件（默认 `.ai-dev-review/unattended-queue.md`）。
-> 目标：一个 pi 会话内串行跑完队列里所有 plan；中途**不找用户**，早上一次性汇总与排查。
+> 目标：一个 pi 会话内串行跑完队列里所有 plan；中途**不找用户**，第二天一次性汇总与排查。
 > 用户授权日期：2026-09-13（规则来源：用户口述，见 §1）。
+
+## 0. 启动话术（用户只需说这一句）
+
+```
+无人值守：按 ~/.pi/agent/dev-review/unattended.md 执行 .ai-dev-review/unattended-queue.md 队列。
+```
+
+主 agent 收到后：读协议 → 按 §2 开跑前检查 → 按 §4 主循环执行。
+**队列文件的存在 = 批次进行中**：扩展检测到它时，每次工作流停机都会在唤醒消息里自动注入无人值守处理指令（分析→验证或跳过→收尾 commit→下一项），主 agent 不需要靠记忆；批次结束或中止后**删除该文件**，避免下次误判。
 
 ## 1. 授权边界（最重要）
 
@@ -23,7 +32,7 @@ reviewer 会读 decision note，没有这句留痕的自动决策视为主 agent
 
 ## 2. 开跑前检查（任何一项不过 → 不启动，说明原因等用户）
 
-- [ ] 队列文件存在且每行格式合法（见 §6）
+- [ ] 队列文件存在且每行格式合法（见 §6）——它的存在也是扩展识别「批次进行中」的唯一信号
 - [ ] 没有 `running` 实例（`/dev-review list`）；有 blocked 旧实例 → 记入值守报告「遗留」节，不阻挡开跑
 - [ ] 工作树干净（`git status`）。不干净 → 先 commit/stash 或等用户，**不得**用 `--allow-dirty` 绕过
 - [ ] 队列内每份 plan 都已冻结（无人值守期间不改 plan；改了 = 新实例）
@@ -87,6 +96,7 @@ test: xcodebuild test -project dieMoney.xcodeproj -scheme dieMoney -destination 
 
 - `test` 行：整个队列共用的测试命令（引擎要求自足，环境变量写全）
 - 每份 plan 一行，顺序即执行顺序；`note` 原文交给 dev 作为任务补充说明
+- **批次全部跑完（或手动中止）后删除队列文件**——它的存在与否决定扩展是否注入无人值守指令
 
 ## 7. 值守报告格式（`.ai-dev-review/unattended-<date>.md`）
 
@@ -113,6 +123,7 @@ test: xcodebuild test -project dieMoney.xcodeproj -scheme dieMoney -destination 
 4. 验收无人值守分支：每份 plan 一个 commit，边界即 plan 边界
 5. **统一整理遗留**：把所有 commit 的 `遗留:` 清单汇总成一份待办，一起排版/收尾（用户统一处理）
 6. 全部处理完再决定合并/丢弃/续跑
+7. 删除 `.ai-dev-review/unattended-queue.md`，结束本批次
 
 ## 9. 已知限制（如实告知用户）
 
