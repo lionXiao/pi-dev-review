@@ -1,5 +1,6 @@
 local.json
 notify.json
+.ai-dev-review/
 .backups/
 .DS_Store
 node_modules/

@@ -1,0 +1,292 @@
+{
+  "scenario": "churn-alert-timing",
+  "provenance": {
+    "run": "5d67",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/ui/GuidedInputScreen.swift:894",
+          "requirement": "冲突与删除保护不回退：用户已输入未保存时不被后台同步覆盖。",
+          "evidence": "逐项填写页的 previousSnapshot / previousBaseline 是实时读取 store 的计算属性；保存时才把当前 store.snapshot 作为 baseSnapshot 传给 update。若用户打开页面后后台同步先把远端快照应用到 store，草稿仍可能是旧状态，但 CAS 基线已经变成远端新状态，保存会被当作合法新写入并静默覆盖远端修改。",
+          "required_fix": "在逐项填写页面建立时捕获快照与基线载荷的完整 pair，保存时使用该 pair 作为 CAS 预期值；若 pair 在编辑期间变化，阻止保存并提示重新核对，或实现明确的可验证合并策略。补充后台同步发生于未保存草稿期间的回归测试。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "major",
+          "location": "src/core/GuidedBaseline.swift:843",
+          "requirement": "included / overlay / baseOnly 在整体替换、编辑和规则生命周期路径下保持既有去重语义。",
+          "evidence": "所有已跟踪固定或年度项在 guided outcome 中都生成 baselineTreatment: .included；treatment(for:) 也只返回 .included 或 .baseOnly。已有 overlay 周期规则再次进入逐项填写并确认后，会被改成 included，分项从当前基线外变成基线内，同时失去 overlay 的未来额外扣减语义。",
+          "required_fix": "预填和整体替换时保留既有 flow/item 的 baselineTreatment；只有用户明确取消跟踪时才转换为 baseOnly。增加已有 overlay 项再次确认、修改金额、暂停和到期后的回归测试，验证 standardMonthlySpend 与 overlayMonthlyDeduction 不发生错误变化。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "major",
+          "location": "src/ui/RootScreen.swift:37",
+          "requirement": "H-4 的「去核对」/「稍后处理」出路在 iOS 和 macOS 均可达，且 macOS 与 iOS 同构。",
+          "evidence": "RootScreen 在 settingsPageIsPresented 为 true 时不负责 alert；但 SettingsScreen 的 runwaySyncFeedback 仅在 #if os(iOS) 下挂载。macOS 设置窗口可见时 activation reload 会把 settingsPageIsPresented 设为 true，因此 macOS 上没有任何承载 userFacingErrorMessage 的 alert，H-4 发生时无法显示「去核对」入口。",
+          "required_fix": "为 macOS SettingsScreen 挂载同一 alert 路由，或调整平台仲裁使 macOS 设置窗口在场时仍有唯一 alert 承载点；补充 macOS 设置窗口可见期间触发 H-4 的导航/alert 回归测试。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "major",
+          "location": "src/ui/GuidedInputScreen.swift:55",
+          "requirement": "设置页入口和 H-4 出路必须提供完整、可退出的更新范围到逐项核对流程；macOS 窗口内流程不能把用户困在范围选择页。",
+          "evidence": "GuidedBaselineScopeView 只接收 onConfirm，没有 onClose、返回按钮或取消工具栏。已有有效基线时设置页入口和 H-4 都先进入该页面；在 macOS inline 承载中用户没有流程内退出路径，在 iOS fullScreenCover 中也没有明确关闭控件。",
+          "required_fix": "把 onClose 传入范围选择页，提供符合平台的关闭/取消按钮，并确保 iOS fullScreenCover 与 macOS inline 两条路径都能安全返回设置页或原页面。"
+        },
+        {
+          "id": "R1-005",
+          "severity": "minor",
+          "location": "src/ui/GuidedInputScreen.swift:997",
+          "requirement": "键盘规则：输入页面不使用工具条，收键盘支持点输入框外空白和滚动。",
+          "evidence": "共享 WalletGuidedKeyboardChrome 只修饰四步 FlowView。选择器中的自定义名称 TextField 所在 ScrollView 没有 scrollDismissesKeyboard，也没有 WalletKeyboardDismissTapCatcher；首次设置的直接填写分支只有 scrollDismissesKeyboard(.interactively)，没有点空白收键盘路径。",
+          "required_fix": "将统一收键盘行为覆盖直接填写分支和常见项选择器，或提供等价的页面级 dismiss/focus 管理，并补充自定义名称输入和直接填写输入的交互回归测试。"
+        },
+        {
+          "id": "R1-006",
+          "severity": "minor",
+          "location": "src/ui/DesignSystem.swift:1680",
+          "requirement": "iOS / macOS、Dynamic Type（含 AX5）和 VoiceOver 通过；AX 特大字号下分项行保持可读。",
+          "evidence": "WalletCompactAmountRow 的项名和金额使用 .system(size: 15/17)，不是相对 Dynamic Type 的字体。代码仅在 AX 尺寸切换上下布局，字体本身不会随 Dynamic Type 放大；现有 AX5 测试只断言 frame 位置，没有验证字体缩放。",
+          "required_fix": "改用语义字体或 .system(size:relativeTo:) 保留设计基准尺寸并支持 Dynamic Type，随后补充 AX5 下字体/可读性和长金额布局断言。"
+        },
+        {
+          "id": "R1-007",
+          "severity": "minor",
+          "location": "src/core/GuidedBaseline.swift:940",
+          "requirement": "确认卡顶部显示相对上次基线的新增、修改、删除变化。",
+          "evidence": "displayable 过滤 modified 时只比较名称和金额。用户在确认卡中切换固定/年度项的跟踪状态会改变 treatment 和周期规则，但金额与名称不变，因此该基线变化不会出现在差异卡中。",
+          "required_fix": "将 treatment、规则存在性及必要的规则状态纳入差异判定，并为仅切换跟踪状态的新增/修改测试补充明确展示文案。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-006",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-007",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "major",
+          "location": "src/ui/RootScreen.swift:192",
+          "requirement": "H-4「去核对」/「稍后处理」动作必须等 alert 关闭动画完成后再修改 state，且 iOS/macOS 均可安全到达。",
+          "evidence": "alert 的 isPresented Binding 在 :192-194 只要收到 false 就立即调用 store.dismissUserFacingError()。H-4「去核对」按钮 :212-213 只延迟 requestGuidedInput，并没有延迟错误状态清理；「稍后处理」:215-216 更直接同步清理状态。相比之下，已有冲突路径 :206-207 使用 beginConflictDismissal + 延迟 finish。这样在 macOS AppKit alert 关闭动画期间会改变 alert 的文案/呈现分支，违反冻结计划的关闭时序要求，可能复现既有 AppKitDialogBridge 崩溃；「去核对」还可能在 alert 尚未稳定关闭时触发承载切换。",
+          "required_fix": "为 H-4 增加与冲突弹窗一致的两阶段关闭状态：按钮动作先保持当前 alert 内容稳定并阻止 Binding setter 立即清除，等待约 500ms 关闭动画完成后再清除 userFacingError；「去核对」在同一延迟任务中建立导航请求，「稍后处理」只完成延迟清理。补充 RootScreen 和 SettingsScreen 两个承载方的 H-4 交互回归测试。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "minor",
+          "location": "src/ui/GuidedInputScreen.swift:3",
+          "requirement": "人类修订后的 3b 口径是逐项填写全路径不提供保存后撤销/回退，代码注释与实现口径应一致。",
+          "evidence": "新增文件顶部仍写着「确认卡 + 常见项选择器 + 更新范围 + 5 秒撤销」，但当前实现和 docs/prd/v1.2-b3-guided-input-plan.md §6 #7 已删除该入口。tests/ModelTests+GuidedBaseline.swift 文件头也仍描述「保存后的撤销回退」，会误导后续维护者重新引入已取消的行为。",
+          "required_fix": "清理 GuidedInputScreen.swift、ModelTests+GuidedBaseline.swift 以及相关 baseline write 注释中的 3b 撤销/回退描述，统一改为确认卡保存后无回退、再次进入预填修正的口径。"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R4-001",
+          "severity": "major",
+          "location": "src/ui/RootScreen.swift:187",
+          "requirement": "H-4「去核对」/「稍后处理」动作必须等 alert 关闭动画完成后再改 state；关闭期间 alert 的标题、文案和按钮分支必须保持稳定，iOS/macOS 均可安全到达。",
+          "evidence": "两阶段关闭只把 isResolvingUserFacingError 置为 true，但 alert 标题在 RootScreen.swift:187 直接读取实时 pendingConflictMessage，Binding getter 在 :191-192 优先切换到冲突分支，按钮在 :209-234 和文案在 :236 也实时读取 store。如果 500ms 关闭窗口内后台同步建立 queuedConflict，H-4 alert 会从「需要注意」切成「同步冲突」并改变按钮；如果错误消息被异步替换，也会发生同样的内容变形。另有 Store.finishUserFacingErrorDismissal 在 :836-838 先释放 isResolvingUserFacingError、再清错误状态，关闭完成瞬间仍存在短暂可呈现状态。现有测试没有在延迟窗口内注入新冲突/新错误，也没有真实驱动两个宿主的按钮 handler。",
+          "required_fix": "在开始关闭时冻结当前 alert 的类型、文案和动作分支，或统一抑制并排队关闭期间到达的其它反馈；500ms 内 Binding 和 alert content 必须只读冻结载荷。完成时先在关闭态清理原始错误/事件，再释放关闭标记，并用事件代际避免误清理关闭期间产生的新错误。补充 RootScreen 与 SettingsScreen 的回归测试：延迟窗口内注入 pending conflict 或新错误，断言标题、文案、按钮不变，动画结束后只呈现排队的新状态，并验证「去核对」只建立一次导航请求。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R4-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R6-001",
+          "severity": "major",
+          "location": "src/core/GuidedBaseline.swift:835",
+          "requirement": "选择器勾选的固定支出、年度支出或自定义分项加入当前清单后，下次逐项填写必须预填；每项又允许留空并按 0 计入。",
+          "evidence": "GuidedInputScreen.swift:971-976 将选择器项目加入 draft，但 GuidedBaselineDraft.outcome 在 :833-835 对所有 amount <= 0 的项目直接丢弃。只要用户还填了其他支出使确认卡可保存，空的选择器项目就不会进入 WalletBaselineData；下次 GuidedBaselineDraft.make 没有该项目可追加，因此“已加入”选择会静默消失。现有测试只覆盖加入草稿和重名，没有覆盖加入空项目、保存、重新进入的链路。",
+          "required_fix": "区分目录默认占位行与用户通过选择器/“添加其他”加入的行，保存时保留用户加入的零金额分项及其稳定 id，继续省略未使用的默认占位行；补充保存后重新进入仍能看到空选择器项目的测试，并覆盖 cashOnly/spendOnly 合并路径。"
+        },
+        {
+          "id": "R6-002",
+          "severity": "major",
+          "location": "src/ui/RootScreen.swift:382",
+          "requirement": "关闭动画期间必须冻结同步冲突的动作分支，后台到达的新冲突不得被旧按钮动作处理或清除；冲突与删除保护不得回退。",
+          "evidence": "冲突的“采用云端版本/保留我的修改”路径在 RootScreen.swift:366-367 不调用 beginConflictDismissal，也不捕获当前 WalletPendingSyncConflict；500ms 后 :382-383 直接调用 resolvePendingConflict(useLocal:)。该方法在 WalletCore+Queue.swift:297-305 只读取届时的 queuedConflict，并在当前 queuedWrite 不匹配时清除当前冲突。若关闭窗口内 C1 被后台替换为 C2，旧 C1 的按钮可能作用于 C2；若队列身份不同，还会直接丢掉 C2。现有回归只覆盖冲突“稍后处理”的身份保护，没有覆盖两个解决按钮的延迟窗口。",
+          "required_fix": "开始冲突解决时捕获当前冲突身份/队列身份，并把期望身份传入延迟完成路径；store 只在当前冲突仍等于捕获对象时执行解决，否则保留新冲突并让状态机在关闭完成后重新呈现。删除“陈旧解决动作清除当前冲突”的行为，并为采用云端、保留本机两条按钮路径分别注入新冲突回归。"
+        },
+        {
+          "id": "R6-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Guided.swift:145",
+          "requirement": "本机或云端基线分项不可读/不一致时，H-4 alert 必须提供“去核对”作为逐项填写的唯一出路。",
+          "evidence": "当前 H-4 判据只是 message.contains(\"重新核对\")。但真实错误路径包含不带该短语的文案：WalletCore+Sync.swift:545 的“云端钱包的分项暂不可读，无法同步另一台设备的钱包”，以及 WalletCore+Queue.swift:447、:635 的“云端基线的分项暂不可读……”。这些消息会使 WalletFeedbackAlertPayload.live 派生为 acknowledgement，按钮只有“知道了”，用户无法到达逐项核对页。现有测试只手工注入包含“重新核对”的单一文案，未覆盖这些生产路径。",
+          "required_fix": "把基线不可读/不一致错误改为统一的类型化反馈原因或唯一 H-4 构造入口，不要依赖中文子串分类；确保所有相关 CloudSync、pending replay、adopt-cloud 分支都产生 baselineReaudit。补充每个生产错误分支到 payload Kind、按钮标题和导航请求的回归测试。"
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R6-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-003",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 8,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R6-003",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 9,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R9-001",
+          "severity": "major",
+          "location": "src/ui/GuidedInputScreen.swift:760",
+          "requirement": "冻结计划 §1「再次进入：确认卡展示新增 / 修改 / 删除」及 §3「删除项只在差异卡展示，不产出负值」",
+          "evidence": "`itemRows` 只渲染 `WalletCompactAmountRow`，没有删除按钮、滑动操作或其它调用 `removeItem` 的生产路径。选择器对已加入项目使用 `.disabled(isAlreadyAdded)`，用户无法从清单移除误选项目。与此同时，`GuidedBaselineDraft.outcome` 在 Core/GuidedBaseline.swift:883 对 `.userAdded` 项即使金额为 0 仍保留，因此清空用户加入项只会形成「旧金额 → ¥0」的修改并在下次进入继续预填，不能形成删除差异。现有测试在 ModelTests+GuidedBaseline.swift:439 直接调用纯逻辑 `removeItem`，没有验证真实 UI 路径。",
+          "required_fix": "为用户加入及预填的自定义分项提供明确、可访问且 iOS/macOS 同构的删除操作，调用 `draft.removeItem(id:)`；保留「仅清空金额仍保留用户加入空项」的 R6-001 语义，只有用户明确删除时才移除。补充真实视图或端到端回归，证明删除后确认卡出现删除项、周期规则被清理、再次进入不再预填，并复跑完整门禁。"
+        }
+      ]
+    },
+    {
+      "round": 10,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R9-001",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R10-001",
+          "severity": "major",
+          "location": "src/core/GuidedBaseline.swift:1139",
+          "requirement": "冻结计划 §1「再次进入：确认卡展示新增 / 修改 / 删除」及 §3「删除项只在差异卡展示，不产出负值」，并保持 R6-001「清空金额仍保留用户加入空项」语义",
+          "evidence": "用户加入的空分项会由 `GuidedBaselineDraft.outcome` 保留在基线中，现有测试 `testGuidedSavePersistsEmptyPickedItemAndPrefillsOnReentry` 已证明该状态可达。再次进入后行尾删除按钮会移除该 id，但差异构造器对所有 previous item 执行 `item.normalizedAmount > 0` 过滤。金额为 0 的已保存用户分项被删除时，`changes` 返回空数组，确认卡不展示删除项；用户仍可保存并实际删除该项，但冻结要求的确认差异缺失。",
+          "required_fix": "区分「目录默认空行因留空而省略」与「用户明确删除的空用户行」，让后者生成删除差异（金额为 0 时也不得生成负值）；补充真实删除路径回归覆盖空用户加入项。"
+        }
+      ]
+    },
+    {
+      "round": 11,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R10-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R11-001",
+          "severity": "major",
+          "location": "src/core/GuidedBaseline.swift:409",
+          "requirement": "冻结计划 §1「再次进入：预填上次分项；分项按稳定 id 匹配、名称可编辑」以及 R6-001「用户加入的空分项必须保留」，并保证删除差异语义不因名称编辑而改变。",
+          "evidence": "`WalletBaselineCatalog.matchedDefaultItem` 在稳定 id 未命中时直接使用单一的 `previousByName[defaultItem.name]` 回退匹配；`GuidedBaselineDraft.make` 随后把该匹配结果标记为 `.catalogDefault`。例如用户加入随机 UUID 的「健身房」项，改名为目录默认的「房贷月供」，以金额 0 保存后，下一次进入时目录默认稳定 id 不存在，但名称回退会消费这个用户项并把它标成 `.catalogDefault`。该行随后没有删除入口，且 `outcome` 会因 `.catalogDefault` 且金额为 0 而省略它；用户再次确认后空用户项会静默丢失，差异卡也不会展示删除。类似地，把已保存的「房租」默认项改名为未保存的「房贷月供」会让新建的「房租」默认项和被名称匹配的旧项复用同一个 id，导致草稿出现重复稳定 ID，后续填写时 `replacingBaseline` 可能丢掉其中一项。现有改名测试只覆盖未保存草稿内的 id 保持，没有覆盖保存后再次预填和名称冲突。",
+          "required_fix": "调整默认项识别，使稳定 id 或持久化来源身份优先，名称回退不能把随机 UUID 的用户加入项重新分类为目录默认项；如需兼容历史无稳定 id 的默认项，应增加可区分来源的迁移标记或持久化 origin，并至少使用组范围内的无歧义匹配。补充回归：用户加入空项改名为目录默认名后保存、再次进入仍为 `.userAdded`、仍可删除并出现 `删除 ¥0`；同时覆盖默认项改名为另一默认名称，断言草稿无重复 id、保存不丢金额。"
+        }
+      ]
+    },
+    {
+      "round": 12,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R11-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 13,
+      "decision": "pass",
+      "verdicts": [],
+      "findings": []
+    }
+  ]
+}

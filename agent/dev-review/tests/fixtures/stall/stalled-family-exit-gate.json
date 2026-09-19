@@ -1,0 +1,830 @@
+{
+  "scenario": "stalled-family-exit-gate",
+  "provenance": {
+    "run": "b2a",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:550",
+          "requirement": "冻结计划 §1.1「改十处只上传一次」及 §1.6 自动提交不得产生保存错误提示",
+          "evidence": "首次自动提交在 deferUpload 分支将 pendingSyncOriginIsKnownLocal 设为 true，但第二次提交进入已有 pending 分支后，只检查 pendingSyncAvailabilityKind。正常尚未失败时该值为 nil，于是落到 line 550 设置 dataErrorMessage。连续修改多个设置会弹出「本机还有待同步修改」决策 alert，并清除已知本机来源标志，随后网络失败也会被错误升级为 alert。",
+          "required_fix": "对已知本机自动提交且尚无冲突的 pending 直接保持 pending 状态，不设置 dataErrorMessage；补充多次自动提交后 dataErrorMessage == nil、状态为 pendingUpload 且最终只上传一次的回归测试。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:289",
+          "requirement": "冻结计划 §1.1、§1.2：待写队列串行、在途上传不并发第二次 CAS，后台 flush 必须可靠完成",
+          "evidence": "flushPendingUpload 只在自身入口检查 isCloudUploadInFlight，但 synchronizeWithCloud 在发现 queuedWrite 后直接调用 reconcilePendingMutation，绕过该保护。与此同时 reconcilePendingMutation 捕获旧 pending 和 generation，并在 CloudKit save 已可能成功后因 mutationGeneration 或 cloudSyncGeneration 变化直接返回，既不处理成功结果，也不重新读取最新 pending。用户在上传中再次修改，或场景重新激活时，可能出现第二次 CAS、把自身已上传的结果误判为冲突，或留下永不再触发上传的 pending。",
+          "required_fix": "将所有 pending reconcile 统一到一个串行/合并入口，禁止同步轮询绕过在途保护；上传完成后重新读取当前 pending，仅在候选和基线仍匹配时清理队列，否则自动为最新候选安排下一次 flush。补充延迟 CloudKit seam 覆盖本地新提交、scene refresh 和轮询同时发生的场景。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:526",
+          "requirement": "冻结计划 §1.4：成功同步后状态回到 hidden，正常态不显示失败或未登录状态",
+          "evidence": "pending 上传成功时清除了 queuedWrite 和 storedCloudAvailabilityNotice，但没有清除 pendingSyncAvailabilityKind。WalletCore.syncStatus 在 line 511 无条件读取该残留分类，因此网络失败后恢复并成功上传，设置页仍会显示「上次同步失败」；若失败分类是 notSignedIn，还会继续显示「未登录 iCloud / 打开设置」。",
+          "required_fix": "所有成功清除 pending 的路径同时清理 pendingSyncAvailabilityKind 和 pendingSyncOriginIsKnownLocal，并增加失败后成功恢复的状态机测试，断言最终 syncStatus == .hidden。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:235",
+          "requirement": "冻结计划 §1.1、§1.5：字段级提交不得被其它正在输入或非法的字段阻塞",
+          "evidence": "currentAge 的校验使用当前表单中的 planningAge，planningAge 的校验使用当前表单中的 currentAge，而不是已提交的 store.snapshot。基线为 30/70 时，用户先把规划年龄输入为 20，再把当前年龄输入为 35，后者会被判定非法，尽管 35 相对于已提交的规划年龄 70 是有效值。反向编辑也有同样问题。",
+          "required_fix": "字段级校验的跨字段约束应基于当前 store 快照，或采用明确的依赖提交策略，不能读取其它字段的未提交值；补充一方字段处于非法中间态时另一方仍能独立提交的测试。"
+        },
+        {
+          "id": "R1-005",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:690",
+          "requirement": "冻结计划 §1.3：撤销只对填写类出现，文案展示提交后的新值",
+          "evidence": "commitNow 对所有字段调用 perform(... registersUndo: true)，perform 再依据 commit.field 计算撤销点。usesCustomHorizon 触发时构造的是 .horizon(...)，其 field 被定义为填写类 horizon，因此切换「直接设置目标周期」开关会错误显示撤销条。同时 showUndoBar 接收的是提交前的 restore，并用 restore.undoMessage 作为文案，现金从 48,000 改为 240,000 时运行时会显示「已更新为 ¥48,000」，而非计划要求的新值。",
+          "required_fix": "分离触发字段、提交后的显示 commit 和恢复 commit：仅当触发字段本身是填写类时创建撤销条，文案从新 commit 生成，restore 只用于撤销动作；补充开关不显示撤销条及金额新值文案的运行时测试。"
+        },
+        {
+          "id": "R1-006",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:346",
+          "requirement": "冻结计划 §1.5：只有合法且规范化后与当前快照不同的值才提交",
+          "evidence": "applySettingsCommit 在 changes(base) 后直接进入 update/updatePreferences/setProjectionEnabled，没有在 Store 提交边界执行 WalletSettingsValidation，也没有先对输入规范化再去重。直接调用 .monthlySpend(0)、.cash(-1)、.currentAge(0) 或 .horizon(0) 会被 update 的归一化逻辑写入本地快照/pending，甚至可能把规范化后等于当前值的输入写成新的 revision。",
+          "required_fix": "在 applySettingsCommit 内统一验证每个 case 的值域和跨字段约束，先得到规范化值再进行去重；非法输入返回 conflict 且不写快照、不创建 pending，并补齐现金、支出、年龄、周期和提醒范围的单元测试。"
+        },
+        {
+          "id": "R1-007",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:127",
+          "requirement": "冻结计划 §2：macOS 与 iOS 行为一致；§1.4 可用性失败由同步状态位承载",
+          "evidence": "macOS 分支把所有 notSignedIn、permission 和 offline 可用性失败都写入 dataErrorMessage，并清空 storedCloudAvailabilityNotice。syncStatus 又把 dataErrorMessage 视为决策类错误，因此 macOS 设置页实际无法显示 failed/notSignedIn 状态，也无法提供「重试」或「打开设置」动作，只能走 alert，违背 macOS 行为一致和状态位承载要求。",
+          "required_fix": "为 macOS 保留可用性状态位数据源并让 SettingsScreen 显示对应动作；如主窗口仍需兼容旧 alert，拆分可用性状态与决策类错误，而不是用 dataErrorMessage 覆盖所有可用性失败。"
+        },
+        {
+          "id": "R1-008",
+          "severity": "minor",
+          "location": "src/ui/SettingsScreen.swift:108",
+          "requirement": "冻结计划 §1.5：提交时去空格、去千分位并规范化回填",
+          "evidence": "currentAge、planningAge 和 horizon 使用 Int(rawText)，AmountInputField.parseAmount 最终使用的 WalletFormatting.parseNumber 只移除逗号，不移除首尾空格。粘贴「 35 」或「 100,000 」会被判为非法而不是在提交时规范化。",
+          "required_fix": "为金额和整数共用去空白解析入口，在合法提交时使用规范化值并回填展示文本；补充首尾空白与千分位输入测试。"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-006",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-007",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-008",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R2-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:491",
+          "requirement": "冻结计划 §1.1、§1.2：所有待写修改均经串行入口，返回/关闭/scenePhase flush 必须可靠完成",
+          "evidence": "uploadPendingMutation 的 while 条件明确要求 pending.kind == .save，因此 synchronizeWithCloud 在发现 .delete pending 后立即返回，reconcilePendingMutation 的 .delete 分支实际上没有轮询或普通 flush 调用者。clearAllData 在离线时保存的删除意图会在页面关闭、进后台和后续轮询中永久留在队列，只有用户再次手动触发清除才会重试。clearAllData 和 retryPendingDelete 也直接调用 CloudGateway.delete，未纳入同一在途保护。",
+          "required_fix": "建立覆盖 save/delete 的统一串行 pending coordinator，追踪删除在途状态并复用一致的成功收尾；增加离线清除、scene flush、轮询和恢复连接后只执行一次删除且最终清空 envelope 的回归测试。"
+        },
+        {
+          "id": "R2-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:383",
+          "requirement": "冻结计划 §1.1、§1.2：在途上传不得并发第二次 CAS，冲突解决和后台 flush 必须串行",
+          "evidence": "resolvePendingConflict 只设置 isResolvingPendingConflict；uploadPendingMutation 的入口只检查 isCloudUploadInFlight，既不检查冲突解决状态，也不等待 retryPendingSave。retryPendingSave 在 force fetch 挂起期间可能被轮询或 scene flush 进入，随后两条路径都调用 saveToCloud；saveToCloud 只递增在途计数，没有拒绝第二个调用，因此 CloudKit save 可并发执行。",
+          "required_fix": "让冲突解决重试等待或加入同一个上传协调器，并在协调器层保证所有 save/delete 调用的单实例串行；增加延迟 seam 覆盖冲突弹窗选择“保留我的修改”同时发生轮询/关闭 flush 的测试。"
+        },
+        {
+          "id": "R2-003",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:494",
+          "requirement": "冻结计划 §1.1、§1.2：填写类失焦提交，返回/关闭/scenePhase 离开不得丢失改动",
+          "evidence": "onDisappear 在 line 496 先取消所有 idleCommitTasks，再启动 flush；closeSettings 也没有先提交当前焦点或等待 commitChain。用户在 800ms 计时器到期前关闭设置，尤其是 macOS 关闭窗口或快速进入后台时，合法输入会被取消，flush 只能看到旧快照。已经启动但仍在 commitChain 中的提交还可能在 flush 返回后才写入新的 pending，导致本次离开没有上传它。",
+          "required_fix": "退出路径应先处理所有可提交字段的 blur/idle 提交，等待 commitChain 完成后再触发非阻塞 flush；不能直接取消尚未提交的合法输入。补充快速关闭、macOS 窗口关闭和 scenePhase 离开测试。"
+        },
+        {
+          "id": "R2-004",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:332",
+          "requirement": "冻结计划 §1.1：直接设置目标周期开关立即生效，隐藏控件的旧提交不得反向修改开关",
+          "evidence": "horizonText 的 idleCommitTask 在 line 539 创建，usesCustomHorizon 的立即变更只调用 valueChanged(.usesCustomHorizon)，没有取消 .horizon 任务，也没有在 commitNow(.horizon) 中检查 usesCustomHorizon。用户修改周期后在 800ms 内关闭开关时，nil 周期提交完成后，残留任务仍会提交隐藏的周期值并重新打开自定义周期。",
+          "required_fix": "关闭 usesCustomHorizon 时取消 horizon 的 idle task，并让隐藏控件的延迟提交在执行前验证当前开关状态；增加“编辑周期后立即关闭开关”的回归测试。"
+        },
+        {
+          "id": "R2-005",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:118",
+          "requirement": "冻结计划 §1.4、§2：决策类错误与可用性状态互斥，macOS 与 iOS 状态语义一致",
+          "evidence": "presentCloudAvailabilityNotice 只检查 queuedConflict 和 isResolvingPendingConflict，没有检查现有的决策类 storedDataErrorMessage。macOS 在云端损坏或其它决策错误后再次收到 offline/notSignedIn 时，会通过 presentAvailabilityAlert 覆盖原 alert 并把 dataErrorMessageIsAvailabilityFailure 设为 true，导致 syncStatus 不再隐藏，用户可以用可用性提示替换掉尚未处理的决策错误。",
+          "required_fix": "在统一状态路由中优先保留决策类错误，可用性失败只能排队或被丢弃，不能覆写决策 alert；补充“corrupt/decision error 后再 offline”的 macOS 状态机测试。"
+        },
+        {
+          "id": "R2-006",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:286",
+          "requirement": "冻结计划 §1.4：成功同步后状态回到 hidden，正常态不显示失败或未登录状态",
+          "evidence": "loaded fetch 分支只调用 clearCloudAvailabilityNotice，未清除 macOS availability alert 使用的 storedDataErrorMessage 和 dataErrorMessageIsAvailabilityFailure。macOS 先收到无 pending 的可用性失败、随后成功 fetch 时，syncStatus 可能变为 hidden，但 userFacingErrorMessage 仍返回旧错误，RootScreen 的 alert 会继续显示过期的失败信息。",
+          "required_fix": "成功 fetch/save 时增加仅针对 dataErrorMessageIsAvailabilityFailure 的清理入口，保留决策类 dataErrorMessage；增加 macOS 可用性失败在 alert 尚未关闭时恢复成功的测试。"
+        },
+        {
+          "id": "R2-007",
+          "severity": "minor",
+          "location": "src/ui/SettingsScreen.swift:569",
+          "requirement": "冻结计划 §1.5：阈值原子组修正后，就地非法提示应随合法提交消失",
+          "evidence": "thresholds 是原子组，但 commitNow 只移除触发字段的 invalidFields。若 warningThreshold 先造成乱序并留下标记，再通过修改 watchThreshold 使四值重新合法，warning 标记仍保留；thresholdValidationMessage 已为 nil 时 validationMessage(for:) 会返回通用错误文案，界面继续显示错误描边/说明。",
+          "required_fix": "阈值组成功提交或判定 unchanged 时清除四个 threshold 字段的 invalidFields，并增加“一个阈值非法、通过另一个阈值修正后错误全部消失”的 UI/状态测试。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-007",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-008",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-005",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-006",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-007",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:500",
+          "requirement": "冻结计划 §1.1、§1.2：待写队列和所有 save/delete/CAS 操作必须严格串行",
+          "evidence": "多个 waitsWhenBusy=true 的调用在 500-502 等待同一个协调器结束；第一个等待者恢复后在 504 设置 running，并在随后 fetch 的 await 点挂起，第二个等待者仍会继续执行 504，因为等待后没有重新检查状态。第一个 defer 还可能在第二个协调器仍运行时把 running 清为 false。",
+          "required_fix": "使用实际互斥队列或在等待后循环重新检查并占用 coordinator；running 标志必须由持有者成对释放，不能由旧��例覆盖新实例状态。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:276",
+          "requirement": "冻结计划 §1.1、§1.2：冲突解决期间的新本地修改不得丢失",
+          "evidence": "performForcedSave 接收旧 pending，在 239 执行异步 fetch；用户或其它本地路径在 fetch 期间提交新 pending 后，271-276 仍无条件构造 forced 并写入 queuedWrite，覆盖新候选。随后成功 save 会被 finishPendingUpload 视为当前候选并清空队列，实际丢失新提交。",
+          "required_fix": "为 force fetch 捕获 generation，在返回后发现 generation 变化时重新读取并 rebase 最新 pending，禁止用旧候选覆盖队列；增加延迟 fetch 期间提交新字段的回归测试。"
+        },
+        {
+          "id": "R3-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:220",
+          "requirement": "冻结计划 §1.1、§1.2：冲突决策与后台 flush 必须串行，采用云端不能继续上传本机候选",
+          "evidence": "resolvePendingConflict(useLocal:false) 直接进入 adoptPendingConflict，不设置 isPendingCoordinatorRunning。flushPendingUpload 和 synchronizeWithCloud 都只检查协调器/云写入状态，不检查 isResolvingPendingConflict，因此可在 adopt fetch 期间执行本机 save。adopt 随后可能把本机回填为云端版本，但后台 save 已将本机候选写到云端，下一次 fetch 又会反向覆盖。",
+          "required_fix": "将 adoptPendingConflict 纳入同一协调器，或让所有 queued flush 在任意冲突决策期间跳过并由决策收尾接管；补充采用云端同时轮询/scene flush 的延迟 seam 测试。"
+        },
+        {
+          "id": "R3-004",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:577",
+          "requirement": "冻结计划 §1.1、§1.2：clearAllData 与在途 save 应顺序执行，不应因本机刚完成的写入产生假冲突",
+          "evidence": "save 在途期间 clearAllData 会把 delete intent 的 baseSnapshot 设为旧 save 基线。save 完成后 finishPendingUpload 的 default 分支只忽略结果，不把 delete 基线更新为刚保存的 savedSnapshot；队列随后执行 delete 时会用旧基线触发 CAS conflict，即使云端变化完全来自本机刚刚的 save。",
+          "required_fix": "当 save 成功且当前队列已替换为 delete 时，将删除意图 rebase 到该 save 的确认快照后再执行；仍需通过 CAS 检测之后发生的真正远端修改。"
+        },
+        {
+          "id": "R3-005",
+          "severity": "minor",
+          "location": "src/ui/SettingsScreen.swift:632",
+          "requirement": "冻结计划 §1.1、§1.5：直接设置目标周期立即生效，非法输入应保持可恢复",
+          "evidence": "用户在自定义周期输入框中清空或输入越界值后关闭开关，代码保留该非法 horizonText。之后再次打开开关时 makeCommit(.usesCustomHorizon) 返回 nil，revertToggleIfNeeded 将开关恢复为 false，而非法输入框继续隐藏，用户在当前设置会话中无法修正该值。",
+          "required_fix": "启用自定义周期时让输入行保持可见并显示就地错误，或提供不清除用户输入的可恢复初始化路径；补充非法 horizon 关闭再开启的 UI 状态测试。"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-007",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-005",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-006",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-004",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-005",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R4-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:659",
+          "requirement": "冻结计划 §1.1、§1.2：在途上传期间的新本地修改不得丢失，冲突和所有待写操作必须串行且按最新队列处理。",
+          "evidence": "reconcilePendingMutation 在 saveToCloud await 前捕获参数 queuedWrite。若 await 期间设置页新提交替换了 self.queuedWrite，save 返回 conflict 或 deleted 后仍使用旧 candidate/旧 pending 调用 saveLocal、赋回 self.queuedWrite 并 applySnapshot(candidate)，会覆盖新提交。现有 testInFlightUploadAdoptsNewerCommitWithoutConflict 只覆盖 saved 回执。",
+          "required_fix": "冲突和远端删除分支必须重新读取当前 pending，保留或合并等待期间的新候选后再建立冲突状态；增加 delayed save + new commit + conflict/deleted 回执的回归测试。"
+        },
+        {
+          "id": "R4-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:327",
+          "requirement": "冻结计划 §1.1、§1.2：冲突决策保留本机修改时不得用陈旧候选覆盖已经 rebase 的本机值。",
+          "evidence": "performForcedSave 在 fetch 后可能将 candidate rebase 为 saveCandidate，并用 saveCandidate 构造 forced pending；但 save 返回 conflict/deleted 时，327 和 337 行仍用原始 candidate 保存并 applySnapshot。第二次 CAS 冲突时，非金融 rebase 结果或 fetch 期间产生的新字段会被回写成旧值。",
+          "required_fix": "冲突、deleted 和持久化失败分支统一使用 forced.candidate/saveCandidate，并按当前 pending 身份重新合并；补充二次 CAS 冲突下的 rebase 回归测试。"
+        },
+        {
+          "id": "R4-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:667",
+          "requirement": "冻结计划 §1.1、§1.2：所有 save/delete/CAS 操作严格串行，clearAllData 不得与在途保存产生假冲突。",
+          "evidence": "persist 在 deferUpload 为 false 时直接调用 saveToCloud，没有取得 pending coordinator。cloudWriteMutex 只能串行物理 RPC，不能更新第二个操作已经捕获的 expectedSnapshot。延迟的直接 update/confirmPurchase 与 clearAllData 交叉时，save 成功结果会因 673 行 generation 检查被丢弃，随后 delete 仍使用旧基线而产生本机写入造成的假冲突；两个直接 persist 也会以同一旧基线顺序提交。",
+          "required_fix": "将立即 persist、同步创建以及其它直接写入入口纳入同一逻辑协调器，或实现等价的 generation-aware rebase/finish 路径；补充直接 save 与 clearAllData、直接 save 与直接 save 的延迟 CAS 测试。"
+        },
+        {
+          "id": "R4-004",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:1310",
+          "requirement": "冻结计划 §1.1、§1.2：后台同步不得覆盖未提交输入，退出时不得把陈旧 UI 值重新写回云端。",
+          "evidence": "mergeStoreSnapshot 无论字段是否 dirty 都将 focusedField 加入 preserved；WalletSettingsFieldLifecycle.exitCommitFields 也无条件把 focusedField 加入退出提交集合。用户输入在 800ms 自动提交后仍保持焦点时，另一台设备更新该字段，UI 会继续保留旧值；关闭时 commitOutcome 将该旧值与新 store snapshot 比较为变更并重新上传，覆盖远端更新。即使用户只聚焦但从未编辑，也可触发同样路径。",
+          "required_fix": "单独追踪真实未提交/dirty 字段，焦点只用于保留光标和防止编辑中重载，不得单独触发保留或退出提交；增加聚焦未编辑、自动提交后远端更新、关闭设置的 UI/模型回归测试。"
+        },
+        {
+          "id": "R4-005",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:191",
+          "requirement": "冻结计划 §1.4、§2：决策类错误与可用性/待写失败状态必须按来源互斥，恢复清理不得丢失无关决策错误。",
+          "evidence": "presentPendingUploadAlert 直接覆盖 storedDataErrorMessage、dataErrorMessageSource 和相关状态，没有检查已有 decision 来源。delete 队列失败、强制 save/delete 失败以及未知 pending 的本地保存路径会直接调用它，因此已有云端损坏或其它决策错误可能被替换成 pendingUpload 消息，后续 syncStatus 和恢复清理也会按错误来源解释状态。",
+          "required_fix": "在 pendingUpload 呈现入口保护已有 decision 错误，或将多个错误来源拆成独立状态并在展示层按优先级选择；补充决策错误与 delete/save unavailable 交叉测试。"
+        },
+        {
+          "id": "R4-006",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:731",
+          "requirement": "冻结计划 §1.1、§1.2：删除取消或操作替换后，陈旧 delete 回执不得清除当前钱包。",
+          "evidence": "finishPendingDelete 的 queuedWrite 参数未使用，并把当前 mutationGeneration 传给 applyConfirmedDeletion，因此 generation 检查实际上总是通过。discardPendingDelete 在 192 行递增 generation、清除 pending 后，已经发出的延迟 delete 成功回执仍会执行 applyConfirmedDeletion，清空 snapshot/envelope 并写入删除标记。",
+          "required_fix": "捕获并验证 delete 操作的 generation 与 pending identity；取消、替换或失效的回执必须直接返回，不得调用 applyConfirmedDeletion；增加 delayed delete + discardPendingDelete 的回归测试。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-004",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R4-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R4-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-006",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R5-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:543",
+          "requirement": "冻结计划 §1.1、§1.2：冲突需要进入决策状态，所有 CAS 按最新队列串行处理，不应在冲突回执后自动重复提交同一旧基线。",
+          "evidence": "当在途 save 返回 conflict/deleted 且等待期间产生新 save 时，settlePendingConflict 在 :779-799 把最新 pending 设置为 conflict 并返回 failure == nil。coordinateQueuedPendingMutations 在 :550-553 只因 failure 非 nil 或 pending 未变化才停止，因此发现 pending 已替换后会立即再次 reconcile 最新候选。该候选仍保留原始旧 baseSnapshot，实际会再次触发冲突，最多一次 flush 重复三次 CAS。现有 R4-001 测试只断言候选保留，没有断言 saveCallCount。",
+          "required_fix": "让 conflict/deleted 的决策结果成为当前 save 操作的终止条件；只有确认队列被替换为独立 delete 或其它明确可继续的操作时才继续，不得把新 save candidate 自动重试。增加 delayed save + newer commit + conflict/deleted 回执测试，断言只产生一次 CAS 并保留一个待决冲突。"
+        },
+        {
+          "id": "R5-002",
+          "severity": "minor",
+          "location": "src/ui/RootScreen.swift:191",
+          "requirement": "冻结计划 §1.3：撤销条优先，同位置同步提示顺延，不叠加、不挤在同一位置。",
+          "evidence": "WalletSyncNoticeModifier 只在 store.undoBarIsVisible 为 false 时消费尚未呈现的 syncNotice。若 :206 已将同步提示放入 presentedNotice，之后撤销条出现时 :191-194 对 isVisible == true 直接返回，不会隐藏或重新排队 presentedNotice。SettingsScreen 的底部 undoBar 与 RootScreen 的底部 presentedNotice 会同时渲染，违反不叠加规则。现有 testUndoBarTakesPriorityOverSyncNoticeQueue 只覆盖尚未消费的队列消息。",
+          "required_fix": "撤销条出现时暂停或收回当前 presentedNotice，并保留其消息到撤销条消失后再展示；为已展示同步提示期间触发撤销的 UI/model 回归测试补充取消和重排队语义。"
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R2-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-006",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 9,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R9-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:718-732; src/app/WalletCore+Writes.swift:716-719; src/app/WalletCore+Queue.swift:292-300,381-400",
+          "requirement": "冻结计划 §1.1/§1.2：待写队列串行、操作身份有效，且既有 CAS 失败处理语义不能被陈旧回执改写",
+          "evidence": "保存请求 await 云端期间，clearAllData 或新的本地提交可以替换 queuedWrite。成功、冲突路径会校验队列身份，但 save 的 .corrupt 和 .unavailable 分支直接写入 dataErrorMessage 或路由失败，没有检查当前 queuedWrite/代际是否仍属于本次请求。陈旧 save 失败因此可能在当前删除意图上写入“本机修改仍保留”的错误，或覆盖当前状态分类。",
+          "required_fix": "为 queued reconcile、普通 persist 和 performForcedSave 的所有失败分支统一增加 pending 身份/代际校验；陈旧回执必须 no-op 或交由当前队列继续处理，不得写错误、修改可用性状态或改变当前操作。补充延迟 save 失败期间替换为 delete 和替换为新 save 的回归测试。"
+        },
+        {
+          "id": "R9-002",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:456-462,640-666",
+          "requirement": "冻结计划 §1.5：非法值就地提示，不清空、不失焦、不夺焦点，焦点留在输入框",
+          "evidence": "handleFocusChange 在焦点已经从 oldField 变为 newField 后调用 commitNow(oldField)。当提交非法时，commitNow 只加入 invalidFields，不恢复 focusedField。点空白路径还会先将 focusedField 设置为 nil；点另一个输入框则焦点转移到新字段。因此空值、负数、越界或乱序输入在失焦验证时会丢失焦点并收起/转移键盘。",
+          "required_fix": "让提交结果显式返回 invalid，并在失焦、点空白和滚动收键盘路径中对非法值恢复旧字段焦点；只有合法或未变化值才允许真正失焦。增加真实 SwiftUI/模拟器回归，验证非法输入仍保留焦点、键盘和原文本。"
+        },
+        {
+          "id": "R9-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:142-145; src/app/WalletCore.swift:701-709",
+          "requirement": "冻结计划 §1.4：同步状态五态必须可见，失败/未登录状态提供对应动作",
+          "evidence": "syncStatus 的最近失败来源在无 pending 时只读取 storedCloudAvailabilityNotice。用户从首页点击“不再提醒”后，muteCloudAvailabilityNotice 会直接清除该 notice；此时 pendingSyncAvailabilityKind 为空，syncStatus 变为 hidden，设置页不再显示“上次同步失败/重试”或“未登录 iCloud/打开设置”。这把首页一次性提示的静音误用于全局状态来源。",
+          "required_fix": "将首页 notice 的静音状态与设置页持久失败状态分离；静音只隐藏首页一次性提示，保留最近失败类型供 WalletSyncStatusBar 显示和执行重试/打开设置。补充静音后打开设置页的状态回归测试。"
+        },
+        {
+          "id": "R9-004",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:599,1290-1334",
+          "requirement": "D-1（human-decision-r07/r08）：键盘动画开始时将被遮挡的聚焦行预滚动并保持同步",
+          "evidence": "revealFocusedFieldIfCovered 使用 proxy.scrollTo(field)，但四个 thresholdTextFields 没有对应的 .id(WalletSettingsField.warningThreshold/watchThreshold/stableThreshold/surplusThreshold)。这些文本回退输入只在 Dynamic Type accessibility size 下出现，正是需要键盘避让的路径，因此预滚动对它们是 no-op，仍会依赖 SwiftUI 的延迟自动滚动。",
+          "required_fix": "为四个阈值输入提供唯一且与 focusedField 一致的 ScrollViewReader id，或改用可靠的实际行定位方式；补充 accessibility size 下四个阈值字段的键盘显示逐帧/行为回归。"
+        },
+        {
+          "id": "R9-005",
+          "severity": "minor",
+          "location": "src/ui/DesignSystem.swift:485-496; src/ui/SettingsScreen.swift:456-462",
+          "requirement": "human-decision-r07 增补：点输入框以外的空白应收键盘并触发失焦提交",
+          "evidence": "WalletInputFieldFrame 的 GeometryReader 附着在整个 settingsRowContent，而不是实际 settingsField/TextField。标准布局的 frame 包含标题、Spacer 和输入框，tap handler 会把标题区及输入行内的大部分空白也视为输入框本体，从而这些位置的点按不会收键盘。",
+          "required_fix": "只上报实际 TextField 的全局 frame，或同时记录输入控件 frame 与行 frame 并在命中判断中仅排除 TextField 本体；补充点击标题区、行内空白和真正输入框的反向测试。"
+        },
+        {
+          "id": "R9-006",
+          "severity": "minor",
+          "location": "src/ui/SettingsScreen.swift:513-528,539-554",
+          "requirement": "冻结计划 §1.3 与清除确认语义：撤销条只对应有效填写提交，清除后不得保留可用的撤销操作",
+          "evidence": "清除数据成功后只调用 mergeStoreSnapshot(preservingEdits: false)，没有调用 dismissUndoBar。若用户在五秒撤销窗口内清除数据，设置页仍显示旧的“已更新…/撤销”条；点击后会尝试在 snapshot == nil 时恢复旧值并返回 conflict。远端删除触发 store.snapshot 变为 nil 时也有同样问题。",
+          "required_fix": "在清除成功、远端确认删除或 snapshot 变为 nil 时清除 undoRecord、取消计时任务并复位 store.undoBarIsVisible；补充清除操作与远端删除期间撤销条不可见的 UI 回归。"
+        }
+      ]
+    },
+    {
+      "round": 10,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R9-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-006",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 11,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R11-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:692",
+          "requirement": "冻结计划 §1.1、§1.2、§1.4：待写队列必须串行处理，冲突进入决策类 alert 后不得被后台或其它保存路径重复提交。",
+          "evidence": "立即保存路径在等待 pendingCoordinatorMutex 后只检查 queuedWrite 是否等于 localPending，不检查 queuedConflict。若第一个保存请求在途期间第二个立即保存进入等待，而第一个请求返回冲突并为当前队列建立 queuedConflict，等待者会继续直接调用 saveToCloud；若队列身份已变化，则会调用未经过冲突门控的 coordinateQueuedPendingMutations。这样会在冲突尚未决策时再次发出同一 CAS，违反 R5-001 的决策状态保护。现有测试覆盖了自动设置提交和成功的立即保存串行化，但没有覆盖立即保存等待者在前一个请求建立冲突后的路径。",
+          "required_fix": "持有协调器锁后重新检查 queuedConflict 和 isResolvingPendingConflict，并在当前队列进入决策态时禁止直接保存或调用裸的 coordinateQueuedPendingMutations；将决策态门控放到所有队列循环入口，或明确区分允许决策的显式意图。增加延迟立即保存、第二个立即保存等待、第一次返回冲突的回归，断言只发生一次 CAS 且冲突仍保留。"
+        },
+        {
+          "id": "R11-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:136",
+          "requirement": "冻结计划 §1.2、§1.4、§1.6：删除操作与待同步冲突必须保持一致，冲突 alert 不得呈现过期操作或错误动作。",
+          "evidence": "clearAllData 将已有 pending save 替换为新的 delete intent，但没有同步清除或替换 queuedConflict。若旧 save 冲突存在且新的 delete 因网络或 CloudKit 故障返回 unavailable，删除 reconcile 分支只写 pendingUpload 错误，不更新 queuedConflict，于是 queuedWrite.kind 已是 delete，而 queuedConflict.pending.kind 仍是 save。RootScreen 会继续展示旧的保存冲突文案和“保留我的修改”按钮；该按钮随后按旧冲突类型选择 forceSave，而协调器发现当前队列是 delete 后会回退到裸队列处理，可能以错误的动作标签执行删除。",
+          "required_fix": "新删除意图替换旧保存队列时，立即使旧冲突失效，并确保删除的每个结果分支都只建立与当前 delete intent 对应的冲突或失败状态。冲突解决入口还应校验冲突对象与当前 pending 身份一致。增加“保存冲突后发起清除，删除返回 unavailable/corrupt”的回归，断言 alert 文案、按钮动作和 pending kind 始终对应删除操作。"
+        },
+        {
+          "id": "R11-003",
+          "severity": "minor",
+          "location": "src/app/WalletCore+Writes.swift:128",
+          "requirement": "冻结计划 §1.3：填写类提交后的撤销条应展示本次填写提交后的新值。",
+          "evidence": "WalletSettingsCommit.monthlySpend 的 value 是 canonical 月均支出，makeCommit 也传入 canonicalMonthlySpend；但 undoMessage 忽略 mode，始终直接格式化该 canonical 值。用户选择“过去 12 个月总支出”并填写 ¥120,000 时，撤销条会显示“已更新为 ¥10,000”，与用户刚提交和当前输入框中的年度值不一致。",
+          "required_fix": "年度模式下使用 mode.displayedValue(forMonthlySpend:) 生成撤销文案，或在提交载荷中保留显示值；增加月均和年度两种模式的撤销文案回归。"
+        }
+      ]
+    },
+    {
+      "round": 12,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R11-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R11-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R11-003",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R12-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:405",
+          "requirement": "冻结计划 §1.4、§1.6：冲突决策和失败状态必须对应当前 pending 操作，冲突 alert 不得继续呈现过期操作或遮蔽当前失败。",
+          "evidence": "保存冲突后用户选择“保留我的修改”时，performForcedSave 会先 fetch 最新云端快照并在 :370-375 用新基线创建 forced pending，覆盖 queuedWrite；但 .corrupt 分支 :405-411 和 .unavailable 分支 :422-431 只写 dataErrorMessage 或 presentPendingUploadAlert，没有更新或清除原来的 queuedConflict。原冲突对象仍指向旧 pending，而 RootScreen.swift:92-123 优先使用 pendingConflictMessage，因此用户继续看到旧的冲突文案和按钮，真实失败状态不可见。下一次点击动作还会命中当前的身份校验并在 resolvePendingConflict :263-265 直接清掉冲突、不执行当前 forced 操作。performForcedDelete 的 :214-225 存在同样问题：fetch 后生成新 delete pending，失败回执却保留旧 delete 冲突对象。",
+          "required_fix": "在 forceSave/forceDelete 决策开始和每个失败分支建立明确的状态迁移：失败时要么清除过期 queuedConflict 并让当前失败 alert/status 成为唯一信号，要么把冲突对象更新��当前 forced pending；成功时清除相关失败状态。增加保存冲突后 forceSave fetch 重基线再返回 corrupt/unavailable、以及删除冲突后 forceDelete 返回 corrupt/unavailable 的回归，断言 alert 内容对应当前操作、queuedConflict 与 queuedWrite 一致或已明确清除，随后再次决策能够真正处理当前队列。"
+        },
+        {
+          "id": "R12-002",
+          "severity": "major",
+          "location": "src/ui/RootScreen.swift:68",
+          "requirement": "冻结计划 §1.1、§1.2：scenePhase 非 active 时必须先提交未落盘的合法输入，再统一 flush 待写队列；退出不能丢失输入，也不应把同一批修改拆成多次 CAS。",
+          "evidence": "RootScreen.swift:68-75 在 scenePhase 非 active 时立即创建独立 Task 调用 store.flushPendingUpload()；SettingsScreen.swift:556-560 同时调用 finishPendingEditsAndFlush，而该方法在 :989-1024 先异步调度 commitChain，再等待提交后 flush。两条路径没有共享“设置页提交排空”状态或顺序保证，pendingCoordinatorMutex 只保护上传，不能阻止 RootScreen 在设置页的本地提交 Task 之前先上传已有 pending。若已有旧 pending 且用户还有一个未到 800ms 的新字段编辑，RootScreen 可能先上传旧候选，随后设置页再落盘并发送第二次 CAS；若应用在后台挂起，也可能只执行 RootScreen 的 flush 而未完成设置页提交。",
+          "required_fix": "把 scenePhase flush 收敛为一个可排序的协调入口：由共享 store/scene flush 状态等待设置页提交排空后再上传，或让 RootScreen 在设置页场景活跃时不启动独立 flush，并由设置页完成提交后交给根层补传。加入真实设置页或等价集成回归：预置已有 pending，同时保留一个合法未提交字段，触发 scenePhase 非 active，断言上传使用最新合并候选、只发生一次预期 CAS，且合法输入已持久化。"
+        }
+      ]
+    },
+    {
+      "round": 13,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R12-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R12-002",
+          "verdict": "still_open"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R13-001",
+          "severity": "major",
+          "location": "src/core/SettingsFormState.swift:142",
+          "requirement": "冻结计划 §2、§3：不得回退 BUG-2026-08-28-A 保护；后台同步到达时正在输入的字段内容与光标不得被覆盖，合法输入不得丢失。",
+          "evidence": "当设置页原快照 usesCustomHorizon=true、用户正在编辑 horizonText、且远端同步得到 usesCustomHorizon=false 时，differingFields 只保留 .horizon，merging 只复制本地 horizonText，却采用 source 的 usesCustomHorizon=false。SettingsScreen.swift:1436 应用该结果后周期输入行被隐藏；随后 exitCommitFields 在 :334-335 移除 .horizon，且 shouldIgnoreCommit 会让其停手提交返回 unchanged，因此本地正在编辑的目标周期既不可见也不会提交，焦点和输入被静默丢弃。",
+          "required_fix": "将自定义周期开关与周期输入作为受保护的耦合编辑状态处理：当 .horizon 是未提交编辑时，保留 usesCustomHorizon=true 并保持输入行和焦点，或保留一个明确的待提交 horizon 意图且退出时不得因远端开关关闭而删除它。补充远端关闭自定义周期期间本地编辑 horizon 的 merge、scene exit 和停手提交回归，断言文本、焦点和最终提交均不丢失。"
+        }
+      ]
+    },
+    {
+      "round": 14,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R12-002",
+          "verdict": "still_open"
+        },
+        {
+          "id": "R13-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R14-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:861",
+          "requirement": "冻结计划 §1.1、§1.2：scenePhase 非 active 时必须先提交未落盘的合法输入，再统一 flush 待写队列；出口不能让尚未开始的防抖上传抢先发出 CAS。",
+          "evidence": "`settingsUploadFlushTask` 在 `settingsUploadMergeWindowDidElapse()` 中启动并调用 `flushPendingUpload()`，随后在 `saveToCloud()` 中等待 `cloudWriteMutex.lock()`。场景出口只在此处调用 `settingsUploadFlushTask?.cancel()`；`WalletAsyncMutex.lock()` 使用不可取消的 continuation，锁释放后会恢复已取消任务。恢复后的任务没有出口门控或取消检查，直接执行 `beginCloudUpload()` 和 CloudKit save。与此同时 scene-exit Task 只在排空完成后才等待该任务，因此两个 MainActor continuation 的调度顺序可能使防抖 CAS 先于设置页 drain。现有回归没有让防抖任务在 `cloudWriteMutex` 上等待并同时延迟 drain。",
+          "required_fix": "把出口状态/代际令牌纳入防抖上传协调；出口请求后，防抖任务必须在取得写锁后再次检查是否仍允许发 CAS，未开始的任务应释放锁并让出口收尾接管。对已发出 CAS 的任务不要用取消改变网络操作结果，而应明确等待。增加“占用 cloudWriteMutex + 防抖窗口已到期 + drain 延迟”的集成回归，断言 drain 时首个 CAS 尚未发生且最终候选只按预期上传。"
+        }
+      ]
+    },
+    {
+      "round": 15,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R12-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R14-001",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R15-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:702",
+          "requirement": "冻结计划 §1.1、§1.2：scenePhase 非 active 时必须先提交未落盘的合法输入，再统一 flush 待写队列；出口不能让尚未开始的防抖上传抢先发出 CAS。",
+          "evidence": "门控检查位于 WalletCore.swift:697，实际调用 CloudGateway.save 位于 :702。跨 actor 的 await 会让 WalletCore 主 actor continuation 暂停；出口请求可以在门控检查完成后、CloudKit actor 执行 save 或其后续 saveConditionally 前到达。CloudGateway.save 内部在 :418 仍会 await 读取记录，并在 :485-486 发起条件写入，期间没有出口代际复查，因此当前实现不能保证排空先于 CAS。",
+          "required_fix": "把出口代际或等价许可检查与 CloudKit CAS 放入同一串行写入边界，并在 CAS 发出前使用该边界内的最终检查；增加可控制 actor 调度顺序的测试，覆盖门控检查后但 CAS 前发生 scene exit 的时序。"
+        },
+        {
+          "id": "R15-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:309",
+          "requirement": "冻结计划 §1.1、§1.2：scenePhase 非 active 时必须先提交未落盘的合法输入，再统一 flush 待写队列，并避免同一批修改拆成多次 CAS。",
+          "evidence": "synchronizeWithCloud 在发现 queuedWrite 后于 :309 调用不带 settingsUploadGate 的 coordinatePendingMutation(.queued)。轮询任务在 WalletCore+Boot.swift:223-233 的场景退出时仍未取消；requestSceneExitFlush 也未使该路径失效。若轮询 fetch 恰在出口请求前后完成，它可以先取得 pendingCoordinatorMutex 并通过普通 saveToCloud 路径发出旧候选 CAS，出口 drain 随后落盘新输入，再进行第二次 CAS。",
+          "required_fix": "让场景出口同步取消/失效轮询并等待其当前同步，或为所有自动 queued 协调引入 store 级出口屏障；出口收尾的 flush 必须拥有明确的排他 bypass。增加延迟 poll fetch/协调器与延迟设置页 drain 的集成回归，验证 drain 期间首个 CAS 未发生且最终只上传合并候选。"
+        }
+      ]
+    },
+    {
+      "round": 16,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R12-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R14-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R15-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R15-002",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R16-001",
+          "severity": "major",
+          "location": "src/app/CloudGateway.swift:560",
+          "requirement": "冻结计划 §1.1、§1.2 及 human-decision-r15：出口 drain 必须严格先于任何尚未开始的 CloudKit CAS，最终出口许可必须与 CAS 位于同一不可穿越的串行写入边界。",
+          "evidence": "CloudGateway.swift:179-184 的 allowsWrite 只在 NSLock 内读取 closedValue/epoch，返回后锁立即释放。最终检查 :560 之后经过 encode，再调用 :562 的 saveConditionally；该方法在 :696-702 调用 database.modifyRecords。即使中间没有 await，MainActor 上的 WalletExitWriteGate.close 仍可在检查返回后、modifyRecords 启动前关闸，形成“检查通过但 CAS 在出口请求后才启动”的竞态。delete 的 :606/:628 与 :607/:629 具有相同窗口。现有 actor 回归的 probe 在初始闸门检查前，且 DEBUG echoesSaveCandidate 在最终检查前直接返回，未覆盖该边界。",
+          "required_fix": "实现原子写入 permit/epoch 或由 CloudKit actor 持有的等价写入 barrier，使 close 与 CAS 启动之间不可穿越；未取得 permit 的自动写入必须返回 superseded，已取得 permit 的写入必须由出口收尾等待。新增最终许可判定后、modifyRecords 前的 save/delete 确定性回归，并避免早期 DEBUG override 绕过真实最终判定。"
+        },
+        {
+          "id": "R16-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Boot.swift:233",
+          "requirement": "冻结计划 §1.1、§1.2 及 human-decision-r15：场景出口后的在途轮询必须取消/失效并等待，或其全部自动写入分支必须携带出口代际；首建路径也不得绕过出口屏障。",
+          "evidence": "轮询循环在 :223-233 继续运行，requestSceneExitFlush 只关闭 WalletExitWriteGate，不取消 cloudPollingTask，也不递增 cloudSyncGeneration。若轮询 fetch 在出口收尾期间尚未返回，出口可能在无 queuedWrite 时完成并重新开闸；随后 fetch 返回，WalletCore+Sync.swift:298 的 generation guard 仍通过，且在无 queuedWrite、云端无记录时于 :337-341 直接调用 saveToCloud(... mode: .synchronizeLocal)，默认不带 bypass，最终会在已完成出口收尾后发出首建 CAS。现有 R15-002 回归只覆盖有 queuedWrite 的 queued 分支，未覆盖该 delayed-fetch/synchronizeLocal 分支。",
+          "required_fix": "在出口请求时取消并等待 cloudPollingTask，或使出口代际贯穿 synchronizeWithCloud 的 fetch 后 continuation 与 synchronizeLocal/queued 写入；至少新增“无 pending + 延迟 polling fetch + 云端无记录 + 出口收尾”的回归，断言出口请求后该轮不会发出 CAS。"
+        }
+      ]
+    },
+    {
+      "round": 17,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R12-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R14-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R15-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R15-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R16-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R16-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R17-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:896",
+          "requirement": "冻结计划 §1.1、§1.2：每次返回、关闭或 scenePhase != .active 都必须先排空当前设置页的合法未提交输入，再统一 flush；出口不能丢失输入，也不能让新的自动写入越过本次出口代际。",
+          "evidence": "requestSceneExitFlush() 只在 sceneExitFlushTask == nil 时捕获 settingsSceneExitDrain；已有收尾任务时在 :896 直接返回，且不会再次递增 cloudSyncGeneration。SettingsScreen.swift:563 在新页面 onAppear 时注册新的 drain，但 :569-570 在新页面 onDisappear 时调用同一入口并立即清空回调。若第一次关闭后的 CloudKit flush 尚未结束，用户重新打开设置页并输入一个尚未到 800ms 的合法值，再次关闭时新 drain 不会被旧收尾执行，旧任务随后只 drain 旧页面并开闸，新输入可能只存在于短生命周期的表单状态中并在挂起时丢失。相同时间窗口内重新激活后启动的 polling fetch 也不会因第二次出口请求递增代际；若其 fetch 在旧任务开闸后返回，当前代际检查仍通过，可能在旧 drain 之后发出 CAS。现有 single-flight 回归只覆盖同一 drain 回调在任务启动前的重复触发，未覆盖重新挂载设置页和新的出口代际。",
+          "required_fix": "将出口协调改为可重入且代际感知：新的设置页 drain 注册或新的非 active 出口请求必须被现有收尾任务观察并排空，不能由 sceneExitFlushTask 非空直接吞掉；在最终 bypass flush 和 open 之前执行最新 drain，并使每个新出口代际失效对应的 polling continuation。新增确定性回归：延迟第一次出口 CloudKit 写入，重新打开设置页输入合法文本并在 800ms 前再次关闭，断言新值已落盘且最终上传候选包含新值；同时覆盖第二次出口后的延迟 polling fetch，断言旧收尾开闸后不发出该轮 CAS。"
+        }
+      ]
+    },
+    {
+      "round": 18,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R17-001",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R18-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:382",
+          "requirement": "冻结计划 §1.1、§1.2；每个新出口代际必须使对应 polling continuation 失效，过期同步结果不得在出口收尾后修改本机快照或持久化状态。",
+          "evidence": "synchronizeWithCloud() 在进入 synchronizeLocal 首建分支前只在 :298-300 做了一次代际检查。随后 await saveToCloud() 返回后，case .deleted 在 :382-387 直接调用 applyConfirmedDeletion()，没有再次检查 syncGeneration == cloudSyncGeneration；同一分支的 case .conflict(latestSnapshot: nil) 在 :375-380 也有相同问题。CloudGateway.save() 的 synchronizeLocal 模式在第二次读取发现 tombstone 或异常记录时可以真实返回 .deleted（CloudGateway.swift:611-616、830-837）。因此旧 polling fetch 已通过初始检查、首建写入等待期间发生新的出口请求时，过期回执仍可能写删除标记、移除 envelope、清空 snapshot 和 queuedWrite，甚至覆盖出口排空后产生的新输入。现有 R18 回归只覆盖 fetch 在出口请求后才返回、从而被 :298-300 拦截的路径，未覆盖首建写入已经开始后返回 .deleted 或 conflict(nil) 的路径。",
+          "required_fix": "在 synchronizeLocal 的 case .deleted 和 latestSnapshot == nil 的 conflict 分支调用 applyConfirmedDeletion 前，增加 syncGeneration == cloudSyncGeneration 与 generation == mutationGeneration 的联合守卫；最好将该代际校验封装到删除确认入口以避免遗漏。新增确定性回归：让 fetch 返回无记录、让 synchronizeLocal 写入延迟后返回 .deleted 或 conflict(nil)，在写入等待期间调用 requestSceneExitFlush() 并完成新的设置页排空，断言过期回执不清空 snapshot、不移除 envelope、不写删除标记，且新输入仍可上传。"
+        }
+      ]
+    },
+    {
+      "round": 19,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R17-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R18-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R19-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:551",
+          "requirement": "冻结计划 §2、§3：不得回退 BUG-2026-08-28-A 保护；后台同步结果到达时，正在输入且尚未提交的字段内容与光标不得被覆盖或丢失。",
+          "evidence": "当设置页没有 queuedWrite、用户正在编辑现金或其他字段且尚未达到 800ms 提交窗口时，原始输入只存在 SettingsScreen 的 @State 中；SettingsScreen.swift:635-650 只安排停手任务，mutationGeneration 要到 WalletCore+Writes.swift:588 的实际 persist 才递增。此时 polling fetch 返回 isDeleted=true 会在 WalletCore+Sync.swift:381-390 通过当前 .sync receipt 进入 applyConfirmedDeletion；该入口随后在 :560 将 snapshot 置为 nil。SettingsScreen.swift:544-552 收到 nil 后调用 mergeStoreSnapshot，而 :1416-1421 无条件重置空表单、editingSnapshot 和非法状态，导致尚未提交的输入被清空，停手提交随后也因无 snapshot 而无法提交。现有 round-19 回归只覆盖出口 drain 已提交新输入的场景，没有覆盖无 pending 时用户仍在原始输入、后台收到远端 tombstone 的路径。",
+          "required_fix": "把活动表单的未提交编辑状态纳入同步删除协调，并补充确定性回归：无 pending 时输入合法值但保持在 800ms 窗口内，随后让后台 fetch 返回远端 tombstone，断言输入文本与焦点不被覆盖且删除确认不会先清空它。实现上应在存在未提交编辑时延迟或作废该同步删除回执，先通过统一 drain 将合法值落盘进入 pending，再以新的基线重新处理 tombstone/冲突；不能仅在 mergeStoreSnapshot 的 nil 分支保留文本而不持久化输入。"
+        }
+      ]
+    }
+  ]
+}

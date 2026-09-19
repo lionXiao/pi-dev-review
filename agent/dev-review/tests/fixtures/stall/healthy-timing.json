@@ -1,0 +1,49 @@
+{
+  "scenario": "healthy-timing",
+  "provenance": {
+    "run": "ct",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:686",
+          "requirement": "Frozen plan §4.2 and Q3=B: record the first real CloudKit use once.",
+          "evidence": "The once-only marker is called only at fetch() entry. Other supported paths reach the first real CloudKit call through availableDatabase() at line 1048, including save/delete flows, without invoking the marker. The Debug-only diagnostic probe also calls container.accountStatus() directly at line 723. If a Settings save or probe occurs before the startup fetch, T4 is absent or is logged later as if it were the first CloudKit use.",
+          "required_fix": "Move the marker to the common accountStatus boundary used by fetch/save/delete, and invoke the same once-only helper before the diagnostic probe's direct accountStatus call. Remove the fetch-only assumption and verify a first-save-before-fetch smoke path."
+        },
+        {
+          "id": "R1-002",
+          "severity": "minor",
+          "location": "src/app/WalletCore.swift:677",
+          "requirement": "Frozen plan §1 and §4.2 T3: measure CKContainer(identifier:) construction time.",
+          "evidence": "The timer starts at line 670 before CKContainer(identifier:) but the mark occurs at line 677 after stored-property assignments, container.privateCloudDatabase access, and CKRecord.ID construction at lines 673-675. The t3-container-init value therefore includes work beyond CKContainer construction.",
+          "required_fix": "Emit the T3 mark immediately after the CKContainer(identifier:) expression and before assigning database, recordID, or other stored properties."
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

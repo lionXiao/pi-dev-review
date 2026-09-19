@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "signed": true,
+  "signedBy": "lion (chat sign-off, 2026-09-19; label table reviewed before the implementing batch)",
+  "signatureNote": "Set signed=true (and signedBy) once every entry below has been reviewed. The label set is the ground truth for stall-detection tests; it must come from human decisions and timelines recorded in the source runs, never from the detector's own output.",
+  "firePolicy": {
+    "soft": "must-fire-by | allowed | must-not-fire — the soft signal injects a class-closure directive into the next task packet; cost is one paragraph.",
+    "hard": "not-before | must-not-fire | allowed — the hard signal stops the loop for a human decision; 'not-before' means the first hard fire must not happen before the given round (late pestering on a converging run is tolerable, early interruption is not)."
+  },
+  "classes": {
+    "stalled-family": "One root-cause family survived several rounds (the whack-a-mole pattern). The detector must cluster the named members (known misses excepted) and soft-fire by the deadline. Hard fire is unconstrained here (that policy lands with the implementation).",
+    "churn": "Same-subsystem churn across rounds in a run that still converged (or ended on a human question rather than code churn). Soft fire is allowed; hard fire must not come before the run's last fix round.",
+    "healthy": "No stall signal at all: neither soft nor hard may fire."
+  },
+  "scenarios": {
+    "stalled-family-exit-gate": {
+      "class": "stalled-family",
+      "expectedFamilies": [
+        ["R12-002", "R14-001", "R15-001", "R15-002", "R16-001", "R16-002", "R17-001", "R18-001", "R19-001"]
+      ],
+      "knownL2Misses": ["R16-001", "R18-001", "R19-001"],
+      "soft": { "expect": "must-fire-by", "round": 16 },
+      "hard": { "expect": "allowed", "round": null },
+      "evidence": "Run b2a (19 rounds, 7 max-rounds extensions). Human decisions name the six historical races (R12-002 / R14-001 / R15-001 / R15-002 / R16-001 / R16-002) plus R17-001 and R18-001 as one root cause ('同一个根因', '一次性集中改造而非逐路径补丁'); R19-001 was accepted as a known limitation and deferred to the next batch.",
+      "notes": "The three known misses are paraphrase siblings: at export time the text/identifier linker did NOT connect them to the family (requirement bigram similarity 0.04-0.07). They are the acceptance target for the hot-context candidate layer (L3)."
+    },
+    "stalled-family-reminder-errors": {
+      "class": "stalled-family",
+      "expectedFamilies": [
+        ["R1-003", "R3-001", "R4-001", "R4-002", "R5-001", "R5-002", "R6-001", "R6-002", "R7-001", "R7-002", "R8-001"]
+      ],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-fire-by", "round": 6 },
+      "hard": { "expect": "allowed", "round": null },
+      "evidence": "Run b2c (8 rounds). timeline r8 unlock note records the user stopping the run because from r3 on every new issue fell on the same reminder-failure line (打地鼠); the run then ended without a pass.",
+      "notes": "Full-family recall case: every member is reachable with verdict streaks / cross references / same-file similarity."
+    },
+    "stalled-issue-tri-state": {
+      "class": "stalled-family",
+      "expectedFamilies": [
+        ["R1-002", "R7-002", "R10-001"]
+      ],
+      "knownL2Misses": ["R10-001"],
+      "soft": { "expect": "must-fire-by", "round": 6 },
+      "hard": { "expect": "allowed", "round": null },
+      "evidence": "Run a3e2 (11 rounds, max_rounds raised 10 -> 12). The human decision at r10 states the open issues had converged to 3 of one root cause and pins r11 to the Envelope baseline field tri-state; r11 verified exactly R1-002 / R7-002 / R10-001 closed.",
+      "notes": "R1-002 stayed open (partially_fixed) from r1 to r10 - the longest single-issue streak in the corpus."
+    },
+
+    "churn-alert-timing": {
+      "class": "churn",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "allowed", "round": null },
+      "hard": { "expect": "not-before", "round": 11 },
+      "evidence": "Run 5d67 (13 rounds). Two churn bands (alert dismissal r3-r8; baseline diff r9-r11) separated by spec_blocked rounds and human acceptance; the run passed at r13.",
+      "notes": "Boundary case: an early hard stop would have interrupted a run that eventually passed, and the mid-run stalls were plan/acceptance questions rather than code churn."
+    },
+    "churn-reminder-hydrate": {
+      "class": "churn",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "allowed", "round": null },
+      "hard": { "expect": "not-before", "round": 5 },
+      "evidence": "Run be1f (6 rounds). Same-file reminder hydrate/restore family across r1-r5; passed at r6 with zero human decisions.",
+      "notes": "Closest boundary case in the corpus: churny enough to soft-fire, cheap enough that an early hard stop would be a false alarm."
+    },
+    "churn-cloud-settings": {
+      "class": "churn",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "allowed", "round": null },
+      "hard": { "expect": "not-before", "round": 6 },
+      "evidence": "Run b2b (7 rounds). Repeated plan/acceptance spec questions plus UI findings; the run ended blocked on spec questions, not on code churn.",
+      "notes": ""
+    },
+    "churn-ax5-fix": {
+      "class": "churn",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "allowed", "round": null },
+      "hard": { "expect": "not-before", "round": 5 },
+      "evidence": "Run b1c (6 rounds). Two partial verdicts on one issue; passed at r6.",
+      "notes": ""
+    },
+    "churn-permission-pending": {
+      "class": "churn",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "allowed", "round": null },
+      "hard": { "expect": "not-before", "round": 4 },
+      "evidence": "Run c4p (6 rounds including two protocol-error escalations). Passed at r6.",
+      "notes": ""
+    },
+    "churn-refactor": {
+      "class": "churn",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "allowed", "round": null },
+      "hard": { "expect": "not-before", "round": 6 },
+      "evidence": "Run r76 (7 rounds, two developer-blocked escalations). Passed at r7.",
+      "notes": ""
+    },
+
+    "healthy-layout": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run b1b (4 review rounds, 7 findings on one screen in r1-r3, all closed by r5).",
+      "notes": "Even same-file bursts must stay below the trigger when each finding closes within a round."
+    },
+    "healthy-quick-fix": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run b1a (3 review rounds). Passed at r5.",
+      "notes": ""
+    },
+    "healthy-b3": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run b3 (3 review rounds; two developer protocol errors recovered outside the loop).",
+      "notes": ""
+    },
+    "healthy-refactor": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run r431 (2 review rounds, no findings).",
+      "notes": ""
+    },
+    "healthy-timing": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run ct (2 review rounds).",
+      "notes": ""
+    },
+    "healthy-threshold": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run c3 (3 review rounds).",
+      "notes": ""
+    },
+    "healthy-spec-block": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run b4 (2 rounds, spec_blocked then pass, no findings).",
+      "notes": "Spec blocks must not trip the stall detector: there is no code churn to detect."
+    },
+    "healthy-polish": {
+      "class": "healthy",
+      "expectedFamilies": [],
+      "knownL2Misses": [],
+      "soft": { "expect": "must-not-fire", "round": null },
+      "hard": { "expect": "must-not-fire", "round": null },
+      "evidence": "Run b3d (4 rounds, three spec_blocked then pass, no findings).",
+      "notes": ""
+    }
+  }
+}

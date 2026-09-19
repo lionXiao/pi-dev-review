@@ -1,0 +1,57 @@
+{
+  "scenario": "healthy-threshold",
+  "provenance": {
+    "run": "c3",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "minor",
+          "location": "src/core/Model.swift:297",
+          "requirement": "冻结计划 §4.1/§4.2：策略输出始终严格递增且全部位于 1...1200；轮盘任何操作后四值严格递增、保存始终可用。",
+          "evidence": "策略仅将 current 的四个分量分别夹紧到 1...1200，没有修复它们之间的顺序关系；SettingsScreen.linkedThresholds 也只在文本无法解析时逐字段使用 fallback。AX 文本路径允许用户产生可解析但非法的组，且 dynamicTypeSize 切回标准字号时没有重载这些状态。例如 current=(3,6,6,24)，标准轮盘将警戒改为 2 时，adjust 返回 (2,6,6,24)：i=0 的下调没有上游链，watch/stable 的相等关系被保留，isValid 仍为 false，保存继续禁用。",
+          "required_fix": "在策略入口或 linkedThresholds 接入层整体验证当前组；若当前组非法，使用合法的 fallback.sanitized 组或实现冻结计划允许的确定性修复后再执行联动，同时保持 AX/macOS 文本路径原有行为。增加可解析乱序 current 的策略/接线测试，并覆盖 AX 文本路径切回标准轮盘后首次操作，确认输出始终合法且保存可用。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "minor",
+          "location": "docs/plans/plan-1.md:116",
+          "requirement": "冻结计划 §5 及 C3 验收记录应准确反映最终全量 XCTest 和新增联动测试数量。",
+          "evidence": "当前 PRD C3 验收条目 app/docs/plans/plan-1.md:114-116 仍写“新增 10 条”和“283/283 全绿”，但当前代码包含 round 1 的 10 条加 round 2 的 2 条测试，实际全量运行结果为 285/285；开发日志 :185-186 已记录 285/285，导致 PRD 与开发日志不一致。",
+          "required_fix": "将 docs/plans/plan-1.md 的当前 C3 验收记录更新为最终数量（285/285、新增 12 条），或明确标注 283/283 仅为 round 1 历史记录；保留 round 2 的 R1-001 修复证据。"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

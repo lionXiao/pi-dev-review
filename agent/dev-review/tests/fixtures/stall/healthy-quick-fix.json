@@ -1,0 +1,69 @@
+{
+  "scenario": "healthy-quick-fix",
+  "provenance": {
+    "run": "b1a",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/ui/OnboardingScreen.swift:90",
+          "requirement": "冻结计划 §2.3：禁用态必须使用中性灰填充 + 次级文字，不再使用降透明度处理；禁用外观应由 WalletPrimaryButtonStyle 唯一表达。",
+          "evidence": "首次设置页的“开始查看”按钮在 `.disabled(!isValid || isSaving)` 后仍调用 `.opacity(isValid && !isSaving ? 1 : 0.45)`。当前 WalletPrimaryButtonStyle 已选择中性灰填充和次级文字，但该页面级透明度会再次降低整个按钮的填充、文字和图标对比度，导致该主操作未实际呈现为样式定义的禁用态。该问题不在快照覆盖范围内，因为现有 onboarding 快照未覆盖按钮的完整禁用状态。",
+          "required_fix": "移除 OnboardingScreen 中的 `.opacity(... ? 0.45)`，保留 `.disabled`，让 WalletPrimaryButtonStyle 完整负责禁用外观；随后重新运行必要测试并检查首次设置页禁用按钮的完整渲染。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "minor",
+          "location": "src/ui/DesignSystem.swift:1116",
+          "requirement": "冻结计划 Q4（父计划 §5）：刻度尺不标注 3/6/12 等数字，只保留刻度线与右端“<充裕分界> 个月 · 充裕线”标签。",
+          "evidence": "WalletHeroGauge 将 leadingLabel 默认设为 \"0\"，并在 :1153 无条件渲染 Text(leadingLabel)。全高 Gallery 快照中每个刻度尺左侧均可见数字 0；AX 路径也保留该数字，因此不符合 Q4 的“只保留刻度线 + 右端标签”口径。",
+          "required_fix": "移除 leadingLabel 参数及其 Text 渲染，保留阈值驱动的右端标签；更新受影响的 Gallery 浅色/深色快照，并按 Q3 流程复核新的视觉差异。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "major",
+          "location": "src/ui/PurchaseSimScreen.swift:413",
+          "requirement": "冻结计划 §1.3：accent 仅保留标识、勾选、链接和破坏性确认用途；正常主操作和非状态信息不得使用品牌红。",
+          "evidence": "正常消费结果路径中，afterWalletMetric 在未超过现金时使用 WalletPalette.accent（:413），daysLostMetric 始终使用 WalletPalette.accent（:429）。这两个值是普通试算结果，不是标识、勾选、链接或破坏性确认，仍会在用户可见的正常试算页面显示品牌红。",
+          "required_fix": "将正常结果路径的 afterWalletMetric 与 daysLostMetric 改为中性 ink 或明确的非状态中性 token，仅在超过现金时保留 critical 状态色；随后复核试算结果态的浅色/深色渲染并更新必要证据。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

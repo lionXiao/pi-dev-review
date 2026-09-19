@@ -1,0 +1,509 @@
+{
+  "scenario": "stalled-issue-tri-state",
+  "provenance": {
+    "run": "a3e2",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:84",
+          "requirement": "冻结计划兼容约束：旧版回写不得丢失 BaselineLineItem / RecurringFlow 字段。",
+          "evidence": "baselineData 被加入与 snapshot/queuedWrite 共用的 Envelope。基线提交前的 42af2bdd 版本中，Envelope 只有 snapshot 和 queuedWrite，saveEnvelope 会把新的 Envelope 整体重新编码到同一个 runway.persistence.json；因此 v1.1.x 在已有 v1.2 分项后执行任意本机保存，会忽略未知 baselineData 键并覆盖写掉它。现有 testLegacyWritebackKeepsBaselineItems 只模拟了 CloudKit CKRecord 回写，没有覆盖本机 envelope 回写。",
+          "required_fix": "把基线载荷迁移到旧客户端不会整体重写的独立 App Group 存储，或实现能保留未知原始字段的兼容存储协议，并补充使用旧版 Envelope writer 回写 snapshot 后分项仍可读取的回归测试。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "major",
+          "location": "src/app/CloudGateway.swift:511",
+          "requirement": "冻结计划要求版本化字段损坏或未知 schema 只降级，不在同步、冲突处理或旧版兼容路径中丢失有效规则。",
+          "evidence": "decodeBaselineData 将字段缺失、坏 JSON 和不支持的 schemaVersion 全部压成 nil；fetch 随后统一返回 loaded，而 WalletCore+Sync.swift:527 和 WalletCore+Queue.swift:535 将 nil 映射为 WalletBaselineWrite.clear。只要本机已有有效 baselineData，云端字段损坏或未来 schema 就会在普通同步或采用云端冲突决策中被清空。代码无法区分真正没有 baselineData 与字段存在但不可解析两种情况。",
+          "required_fix": "为 baselineData 增加明确的 missing / invalid / valid 状态；只有确认云端字段确实缺失或显式为空时才清本机分项，字段损坏或不支持的未来 schema 应保留本机数据并保留云端原始字段。补充坏 JSON、schemaVersion=2、快照相同但分项损坏的同步与采用云端测试。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:447",
+          "requirement": "冻结计划模型容错要求单个坏字段不使整条钱包记录损坏；schemaVersion 必须作为本机和云端共同的版本门。",
+          "evidence": "Envelope 使用合成 Codable 解码。baselineData 内缺失 schemaVersion、错误类型或坏 JSON 会使 WalletBaselineData.init(from:) 在 WalletBaseline.swift:354-361 抛错，继而整条 Envelope 解码失败；loadEnvelope 的两个新格式读取路径都返回 nil，随后旧 snapshotKey/queuedWriteKey 也通常不存在，导致 WalletPersistence.load() 把仍有有效 snapshot 的钱包当成无数据。本机 loadBaselineData 也没有检查 schemaVersion 范围，schemaVersion=2 会被接受并在后续 saveLocal / baselineWriteForUpload 中重新编码，丢掉未来版本未知字段。",
+          "required_fix": "为本机 Envelope 实现逐字段容错解码，baselineData 无法解析时仍返回 snapshot 和 queuedWrite；对超出支持范围的 schemaVersion 保留原始载荷并视为不可用，而不是重新编码已知字段后覆盖未知字段。补充坏 baselineData 不影响钱包启动、schemaVersion=2 不被重写的本机持久化测试。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "minor",
+          "location": "src/app/CloudGateway.swift:772",
+          "requirement": "冻结计划 tombstone 清理口径：删除时清空 WalletState.baselineData，重建钱包不得继承旧分项。",
+          "evidence": "delete 在检查到 current.isTombstone 时直接返回 .deleted，未执行后面的 current.record[baselineField] = nil。由旧版客户端创建、但残留 baselineData 的 tombstone 因此不会被本批删除路径清理；只有后续 create 路径碰巧再次清字段。",
+          "required_fix": "对已存在的 tombstone 增加一次条件清理 baselineData 的修复写入，或在统一 tombstone repair/create 清理入口中保证字段被删除，并补充 tombstone 携带残留 baselineData 的测试。"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R2-001",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:608",
+          "requirement": "冻结计划兼容约束：旧版回写不得丢失 BaselineLineItem / RecurringFlow 字段。",
+          "evidence": "当主文件不存在、但 UserDefaults 中仍有旧 persistenceKey 信封且独立备份包含有效基线时，迁移分支解码出 baselineData=nil 后调用 saveEnvelope(envelope)。该调用默认 syncBaselineBackup=true，随后 writeBaselineBackup(nil) 删除有效备份，导致新版无法在旧版回写后恢复分项。",
+          "required_fix": "修正 persistenceKey 迁移的备份同步意图，保留旧信封缺失的基线备份；只有明确的基线清空操作才能删除备份，并增加该迁移场景的回归测试。"
+        },
+        {
+          "id": "R2-002",
+          "severity": "major",
+          "location": "src/core/Baseline.swift:689",
+          "requirement": "冻结计划要求版本化字段损坏或未知 schema 只降级；只有字段确实缺失或有效空载荷才能清除本机分项。",
+          "evidence": "baselineData 字段存在但其 Data 长度为零时被分类为 .missing。WalletCloudRecordParser 随后把它当成字段缺失，普通同步会走 baselineAdoptionWrite(.clear)，清掉本机已有的有效分项。空 Data 是在场但无法解码的损坏载荷，不应等同于字段不存在。",
+          "required_fix": "将 nil 与空 Data 分开处理：nil 才是 missing，非 nil 的空 Data 应是 invalid；补充 CKRecord baselineField=Data() 且本机已有分项时同步不清空的测试。"
+        },
+        {
+          "id": "R2-003",
+          "severity": "major",
+          "location": "src/app/CloudGateway.swift:934",
+          "requirement": "冻结计划要求坏 JSON 或未来 schema 的云端原始字段在同步、冲突和旧版兼容路径中保留，不得被有效本机规则静默覆盖。",
+          "evidence": "WalletCore.baselineWriteForUpload 只有在进程内 cloudBaselineFieldIsUnreadable 为 true 时才返回 preserve；该状态依赖成功 fetch。CloudGateway.save 已经读取当前 CKRecord，但 encodeBaseline 对 replace 直接重新设置 baselineField，没有检查当前记录中的字段是否 invalid。因此重启后首次上传、fetch 失败后上传，或 synchronizeLocal 冲突路径均可用本机载荷覆盖云端未知 schema/坏字段。现有测试只注入 fetch 状态，没有覆盖实际 save 编码边界。",
+          "required_fix": "在每次 update/updateNonFinancial CAS 编码前读取并分类当前 CKRecord 的 baselineField，字段在场但 invalid 时强制 preserve 原始值；必要时让冲突/重试结果携带该状态。补充实际记录编码和重启后首次上传回归测试。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R2-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-003",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "major",
+          "location": "src/core/Baseline.swift:587",
+          "requirement": "冻结计划 §1.1/§4 的去重语义：baseOnly 只计入本次基线，不创建周期规则。",
+          "evidence": "replacingBaseline 遍历 draft.flows 时只检查来源分项存在和 source 去重，没有过滤 baseOnly。WalletBaseline.swift:603 和 :621 将 draftFlow.baselineTreatment == .baseOnly 转换为 .included 并追加到 flows，随后 :637 的对齐逻辑又把来源分项改成 included。只要草稿同时携带 baseOnly 分项和对应 flow，结果就会产生不应存在的规则，trackedFlowCount、规则生命周期和再次确认语义均错误。现有 testReplacingBaselineReusesFlowsAndDropsRemovedItems 只测试了无 flow 的 baseOnly 分项，未覆盖该组合。",
+          "required_fix": "整体替换时对 draftFlow 及其来源分项的 treatment 做门控：baseOnly 来源不得进入 flows，且不得被规则对齐为 included；补充 baseOnly 草稿带残留 flow、从 included 改为 baseOnly、重复确认三种回归测试。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:296",
+          "requirement": "冻结计划的非法输入和持久化契约：非法基线不得产生错误或静默清除既有分项，失败应保留可恢复副本并返回持久化失败。",
+          "evidence": "WalletBaselinePayload.encode 在 WalletBaseline.swift:699 以 Data? 返回编码失败；BaselineLineItem/RecurringFlow 的直接初始化仍可携带 NaN 或 infinity，JSONEncoder 对此会返回 nil。SharedCore.swift:296 把 .replace 的编码失败和正常 .clear 都解析成 nil，saveLocal 随后继续调用 saveEnvelope 并返回成功，saveEnvelope 还会删除旧备份。已有有效 baseline 后用含非有限金额的 .replace 会静默清掉信封和备份，且调用方看不到失败；现有测试没有覆盖编码失败。",
+          "required_fix": "将 .replace 编码失败与 .clear 分离，使 saveLocal 在编码失败前直接返回 false并保留旧信封/备份；或先对所有金额字段做确定性归一化后再编码。补充已有有效基线遇到 NaN、infinity 和不可编码字段时主副本与备份均保持不变的测试。"
+        },
+        {
+          "id": "R3-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:821",
+          "requirement": "冻结计划 §2/§3/§4 要求聚合值与分项同批一致，损坏或未知 schema 只降级且不得在同步路径丢失有效规则。",
+          "evidence": "CloudGateway.encode 在 :940-945 可以把本次 .replace/.clear 降级为 .preserve，但该降级不会出现在 WalletCloudSaveResult 中。finishPendingUpload 在 WalletCore+Sync.swift:821-827 只要收到 .saved 就保存快照、清空 queuedWrite 并返回成功。于是用户在云端 baselineData 为坏 JSON/未来 schema 时确认新的分项，云端只更新聚合快照而保留旧的不可读字段，本机待写队列却被清掉；当字段之后恢复为可读旧 payload 时，普通同步会依据 WalletCore.swift:944-954 采用云端基线，静默覆盖本机刚确认的规则。",
+          "required_fix": "把 preserve downgrade 作为显式结果或状态传播到 Store；基线请求未真正写入时不得按完整保存成功收尾，应保留带新分项的 pending、返回可重试失败/决策状态，或建立明确的冲突记录。补充真实保存收尾、重启、字段恢复后同步以及本机规则不丢失的回归测试。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R5-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:591",
+          "requirement": "冻结计划 §1/§4 要求逐项填写与直接填写同值，聚合值与 BaselineLineItem/RecurringFlow 映射可复核，并在同一次写入中保持一致。",
+          "evidence": "WalletBaselineData.reconciliation 只在 WalletBaseline.swift:485-490 定义，生产代码没有调用。update 在 WalletCore+Writes.swift:264-265 规范化 cash/monthlySpend 后，于 :318-323 直接把任意 .replace(baseline) 传入 persist；persist 在 :591 解析写入意图，并在 :615、:678 或 :706 保存快照和分项，却没有校验 baseline.cashTotal == candidate.cash、baseline.standardMonthlySpend == candidate.monthlySpend。调用方可以因此成功持久化并上传聚合值与分项不一致的基线。现有测试只断言一个匹配输入的前置条件，没有覆盖不匹配时拒绝且保持原状态。",
+          "required_fix": "在 persist 的唯一写入边界，对 .replace(data) 使用最终 candidate 的规范化 cash/monthlySpend 调用 reconciliation(...).isSavable；不一致、月均支出非正或非法时在创建 pending、写本机信封和发起 CAS 之前返回失败。补充 cash 不匹配、monthlySpend 不匹配和全空基线的测试，断言 snapshot、baselineData 和 queuedWrite 均保持不变。"
+        },
+        {
+          "id": "R5-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:559",
+          "requirement": "冻结计划 §3/§4 要求损坏或未知 schema 只降级，不在冲突决策、恢复同步或清理路径中丢失有效规则。",
+          "evidence": "采用云端决策遇到 .invalid 时，WalletPersistence.saveLocal(... baseline: .preserve) 会保留本机分项，但随后无条件清空 queuedWrite；当字段恢复为可读的旧载荷时，普通同步会按 baselineAdoptionNeeded 采用该旧载荷。显式 .clear 更新也在本机先清空 baselineData，随后 baselineWriteForUpload 返回 .preserve，finishPendingUpload 将其按完整成功清空队列。两条路径都能在恢复同步后让旧云端规则重新覆盖本机决定。",
+          "required_fix": "在 queuedWrite 中增加可持久化的基线操作状态，区分 preserve、replace 和 clear；云端字段 invalid 时，采用云端决策不得丢弃未能确认的本机基线状态，clear 也必须等待字段恢复后重试。为两条路径补充重启、恢复同步和最终云端字段验证测试。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R5-002",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R6-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:925",
+          "requirement": "冻结计划 §1/§2/§4 要求直接填写与逐项填写同值，聚合值与 BaselineLineItem/RecurringFlow 映射可复核，并在同一次 CAS 写入中保持一致。",
+          "evidence": "WalletCore+Writes.swift:430-447 的现金/月均支出设置提交使用默认 .preserve；本机 snapshot 会被更新，但 baselineData 保持旧值。baselineWriteForUpload 在 intent == .preserve 时直接 break，随后在 :937-939 因 baselineData 非 nil 推断为 .replace。CloudGateway.swift:955-997 只编码 snapshot 和 baseline，不执行 reconciliation，因此已有有效分项后直接修改现金或月均支出会把新聚合值与旧分项一起写入云端。现有测试 testDeferredBaselineSurvivesFlushWhileCloudFieldStaysUnreadable 还明确构造了现金增加后恢复时 .replace(localBaseline)，但 save 使用 override，未验证真实记录的一致性。",
+          "required_fix": "不要把 pending .preserve 隐式转换成 .replace。财务聚合值改变时明确重建匹配分项、显式清空基线或在写入边界拒绝；所有 pending/replay/CloudStore.save 路径都必须执行 reconciliation。增加已有 baselineData 后直接修改 cash 和 monthlySpend 的真实记录回归，确认不写入不一致载荷。"
+        },
+        {
+          "id": "R6-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:565",
+          "requirement": "冻结计划 §2/§3/§4 要求损坏或未知 schema 只降级，且聚合快照与分项规则在同一 CAS 写入中保持一致。",
+          "evidence": "performAdoptCloud 在云端 baseline invalid 时用 candidate: latestSnapshot 创建 .replace pending，同时保留本机 baselineData。随后 applyRemoteSnapshot 采用了云端聚合值；字段恢复后 reconcilePendingMutation.swift:968-978 直接以该 latestSnapshot 和本机 .replace baselineData 调用 saveToCloud。CloudGateway.encode 没有聚合对账，因此只要云端快照与本机分项原来的聚合不同，就会永久写出不一致的 snapshotData/baselineData。现有采用云端测试通过 save override，未检查真实 CKRecord 的编码结果。",
+          "required_fix": "deferred pending 必须携带与 baselineData 聚合一致的 candidate，或保留本机完整快照并在用户重新核对前不上传；在 CloudStore/pending replay 的最终写入边界强制 reconciliation。补充不使用 save override、云端快照聚合与本机 baseline 不同的实际 CAS 回归。"
+        },
+        {
+          "id": "R6-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:524",
+          "requirement": "冻结计划 §3 要求 invalid/未知 schema 在同步中只降级，不在字段恢复或重启路径中静默丢失本机有效规则。",
+          "evidence": "invalid fetch 且无 queuedWrite 时，synchronizeWithCloud 只保留 baselineData 并返回；它没有记录本机基线操作。下一次 fetch 得到不同的 valid 旧载荷时，baselineAdoptionNeeded(.valid) 返回 true，随后 baselineAdoptionWrite(.valid) 为 .replace，旧云端规则覆盖本机规则。当前测试只覆盖 invalid 时即时不清空，以及恢复为与本机相同的载荷，没有覆盖恢复为 stale valid payload 的无 pending 路径。",
+          "required_fix": "在 invalid 状态观察到本机有效 baselineData 时持久化保护性 pending/意图；字段恢复后先重试本机规则或进入明确冲突处理，不得直接采用 stale valid payload。补充普通同步 invalid -> 重启 -> stale valid recovery 的最终本机和云端字段断言。"
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R5-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R6-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-003",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R7-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:491",
+          "requirement": "冻结计划 §1/§2/§3/§4 要求聚合值与 BaselineLineItem/RecurringFlow 映射可复核，并在同步、冲突、tombstone 和同一次 CAS 中保持一致。",
+          "evidence": "WalletCloudSaveResult.conflict 只返回远端 WalletSnapshot。synchronizeLocal 首次 fetch 看到无记录后，如果 save 与另一设备的建钱包竞争，:486-499 会用 saveLocal(latestSnapshot) 的默认 preserve 保存远端新聚合值，再 applyRemoteSnapshot，旧本机 baselineData 不变。以本机 S0+B0、远端 S1+B1 或 S1+invalid 为例，结果是 S1+B0；下一次 invalid 保护 pending 还会携带本身已不匹配的 S1+B0，最终 replace 对账会持续失败。同样的问题存在 keepPendingDelete 的 :1237-1255，以及 performForcedSave 忽略 loadedWithBaseline 状态并由 finishPendingUpload 默认 preserve 保存的路径。现有 testSynchronizeLocalConflictKeepsLocalBaselineKeepsLocalBaseline 只断言分项仍存在；该测试的本机分项金额本身与 demo snapshot 不一致，也没有断言 reconciliation。",
+          "required_fix": "为 save/delete 冲突回执携带完整的远端 baseline payload state/raw payload，或在无法取得配对字段时保留本机完整 snapshot+baseline 并停在明确冲突。修复 synchronizeLocal 冲突、keepPendingDelete 和非金融 forced rebase，确保 valid 用 replace、missing 用 clear、invalid 不采用；补充不使用 save override 的 S0+B0 与 S1+B1/invalid 实际记录回归，并断言最终 reconciliation。"
+        },
+        {
+          "id": "R7-002",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:524",
+          "requirement": "冻结计划要求未知 schema/损坏载荷只降级、不丢失规则，旧版回写保留分项，同时聚合值与分项必须可复核。",
+          "evidence": "WalletCore.init 只加载 WalletPersistence.loadBaselineData()，没有保留本机 baseline 的 missing/valid/invalid 状态，也没有用当前 snapshot 做 reconciliation。旧版回写测试明确将 snapshot.cash 改为 51,234 而保留旧 baseline，WalletCore 仍把该 baseline 当作可用值。此后 invalid 云端恢复会以不匹配的本机 snapshot 建 protective replace。另一分支中，本机 schemaVersion=2 原始载荷会被 loadBaselineData 压成 nil；若云端返回一个可解析且聚合一致的旧 schema，baselineAdoptionNeeded(.valid, current: nil) 会在 src/app/WalletCore+Sync.swift:556-562 以 replace 覆盖本机未知 schema 原始字节。现有测试只验证 preserve 保存不重编码，未覆盖有效云端采用覆盖本机未知载荷或旧版回写后的 pair 校验。",
+          "required_fix": "在 Store 中保留本机完整 baseline payload state/raw bytes；启动和旧版回写后先校验 snapshot 与可解码 baseline 的聚合关系，将 mismatch/invalid 作为需重新核对的降级状态而不是可用 baseline。云端 valid adoption 不得覆盖本机 invalid/unknown raw payload，除非用户明确采用或重建；增加 legacy mismatch、schemaVersion=2 重启后同步和最终状态断言。"
+        },
+        {
+          "id": "R7-003",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:704",
+          "requirement": "冻结计划要求本机快照、基线分项和待写意图保持原子状态，持久化失败不得产生半状态或丢失未知规则。",
+          "evidence": "saveEnvelope 在 :704 先写入或删除独立 baseline backup，再在 :723-729 写主 envelope；主文件编码/写入失败时只返回 false，不回滚已经更新的 backup。loadBaselinePayloadState 在 :239 又会在 envelope.baselineData 缺失时采用 backup。具体地，旧版 envelope 已删除 baselineData 但仍有 S0，随后一次写 S1+B1 在备份成功、主 envelope 失败后返回失败；重启会读取旧 S0 加新 backup B1，形成与失败操作相关的不一致 pair。现有 failsBaselineBackupWrites seam 只覆盖备份先失败，未覆盖主 envelope 失败后的恢复路径。",
+          "required_fix": "将 sidecar 与 envelope 绑定同一 generation/提交标记，并在主写失败时回滚 sidecar，或实现可恢复的两阶段临时文件提交；读取时只接受与主 envelope 同代的 backup。补充主文件写入失败发生在 backup 更新之后的重启回归，确认失败操作不会改变 snapshot、baseline 或 pending。"
+        }
+      ]
+    },
+    {
+      "round": 8,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "still_open"
+        },
+        {
+          "id": "R5-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R7-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R7-002",
+          "verdict": "still_open"
+        },
+        {
+          "id": "R7-003",
+          "verdict": "still_open"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R8-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:939",
+          "requirement": "冻结计划 §3/§4、R7-002 要求本机未知/损坏/mismatch 基线只降级；云端 valid/missing adoption 不得在用户明确采用云端或重建之外覆盖本机原始载荷，且快照与分项必须配对。",
+          "evidence": "performForcedSave 对远端 valid 或 missing pair 返回 adopt 时没有检查 localBaselineState.isInvalid，finishPendingUpload 随后在此处把远端 valid 映射为 replace、missing 映射为 clear 并写入本机。一个本机持有 unknown/corrupt raw payload、仅提交非金融修改并选择“保留我的修改”的场景会静默覆盖或清空本机原始规则。keepPendingDelete 在 WalletCore+Sync.swift:1299 也有相同缺口。现有测试只覆盖本机有效基线加远端 invalid，未覆盖本机 invalid 加远端 valid/missing。",
+          "required_fix": "在 forced replay 和删除冲突的自动采用前检查本机状态；localBaselineState.invalid 时保留完整本机 snapshot/raw payload、保留 pending 并进入明确冲突。只有 performAdoptCloud 这类用户明确采用云端的路径才能覆盖该 raw payload。"
+        },
+        {
+          "id": "R8-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Queue.swift:430",
+          "requirement": "冻结计划 §1/§4 要求聚合值与 BaselineLineItem/RecurringFlow 映射可复核，任何同步或重放不得写出不一致 pair。",
+          "evidence": "remotePairAdoption 会把可解析但与远端快照不一致的 baseline 判为 unresolved，但此处只有在本机已有 payload 或 pending intent 非 preserve 时才停止。对于本机无 baseline、非金融 preserve pending 的场景，代码继续执行，并在 :493 把原始 fetchedRemoteBaselineState（仍是 .valid）传给 finishPendingUpload；:939 随后用 replace 写入而没有再次 reconciliation。非金融重放时 CloudStore 的 preserve 校验因财务聚合未变化也不会拦截，最终本机会得到可用标记下的 mismatch pair。",
+          "required_fix": "unresolved 必须对所有 replay 直接停止，不能把 fetched raw state 传给 finish 的 adoption 参数；finishPendingUpload 也必须独立验证 adopted baseline 与 savedSnapshot 的 reconciliation，只接受 remotePairAdoption 明确确认的 valid/missing 状态。"
+        },
+        {
+          "id": "R8-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:616",
+          "requirement": "冻结计划要求本机快照、基线分项和待写意图保持一致；旧版回写和启动 hydrate 后必须重新校验聚合关系。",
+          "evidence": "WalletCore.init 在 :545-548 只用信封 snapshot 对 local baseline 做一次对账。随后 ReminderCoordinator 在 hydrate 中提升与信封不同的 pending candidate，:616 直接把 candidate 赋给 snapshot 并以 preserve 保存，却不重新分类 localBaselineState。旧版 pending 的直接财务修改可以因此形成 S1+B0，同时 store.baselineData 仍被标记为 valid；localOnly 的 hydrate 关闭收敛路径也直接调用 saveLocal/ applySnapshot，没有统一的最终对账。",
+          "required_fix": "hydrate 必须先确定最终候选 snapshot，再对该 snapshot 重新执行 baseline state 分类；mismatch/invalid 只能保留 raw payload 并进入降级状态。为普通 candidate 提升、失败关闭收敛和重启后的旧 pending 增加实际带 baseline 的回归测试。"
+        },
+        {
+          "id": "R8-004",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:309",
+          "requirement": "冻结计划兼容约束要求旧版回写不得丢失 baselineData；独立备份读取必须保留旧裸 payload。",
+          "evidence": "BaselineBackupFile 的 generation 和 payload 都是 Optional。一个旧版本写入的裸 WalletBaselineData JSON 没有这两个键，但 JSONDecoder 仍会成功解码为 generation=nil、payload=nil，因此 :312 的裸字节 fallback 永远不会执行。生产文件后端会把有效旧 sidecar 分类为空载荷，后续 loadBaselinePayloadState 返回 missing，下一次 preserve 保存还会覆盖/删除该唯一副本。现有迁移测试使用 InMemoryStore，直接绕过了这个文件解码分支。",
+          "required_fix": "给 wrapper 增加必需的格式标记或必需字段，只有确认存在 wrapper 标记时才按 BaselineBackupFile 解码，否则按旧裸字节返回；增加真实文件内容的旧裸 sidecar 迁移、重启和 preserve 测试。"
+        },
+        {
+          "id": "R8-005",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:282",
+          "requirement": "冻结计划要求 sidecar 与主信封同代提交；主写失败不得造成 snapshot、baseline 和 pending 的半状态。",
+          "evidence": "effectiveBaselineSidecarPayload 只有在 envelopeGeneration 非 nil 时检查 generation mismatch；无代信封会接受任意 sidecar。saveEnvelope 在 :764-768 先写新代 sidecar，主写失败后 :777 或文件 catch 中调用 restoreBaselineBackup，但该回滚失败被忽略。若旧版无代 envelope 的主写失败且 sidecar 回滚失败，重启会把新 sidecar 与旧主 snapshot 配成一对，正好重现 R7-003 的半状态。现有测试的主信封已有 generation，且内存回滚总能成功。",
+          "required_fix": "采用带提交标记的两阶段/可恢复提交，或让失败后的新代 sidecar 在无代主信封下不可被接受；回滚失败必须进入 fail-closed 状态并保留待修复信息。补充无代主信封、sidecar 已更新、回滚失败后的重启回归。"
+        },
+        {
+          "id": "R8-006",
+          "severity": "minor",
+          "location": "src/app/WalletCore+Writes.swift:802",
+          "requirement": "冻结计划 §3 要求 baseline change deferred 时本轮 flush 停止，不重复发送同一不可完成的 CAS。",
+          "evidence": "finishPendingUpload 在队列已被新的 save candidate 替换时返回 result=.saved、baselineChangeDeferred=true（WalletCore+Sync.swift:961-988）。立即保存路径在此处只检查 result，随后无条件调用 continuePendingQueueAfterInFlightWrite；performForcedSave 在 :497-499 也相同。云端 baseline 仍不可读时，这会在同一轮继续发起新的 preserve/CAS，至少造成额外写入并绕过 deferred 的停止语义。",
+          "required_fix": "调用 continuation 前同时检查 finish.baselineChangeDeferred；为立即保存和 forced save 添加在途新候选加 savedPreservingBaseline 的回归，断言同一轮只发一次 CAS。"
+        }
+      ]
+    },
+    {
+      "round": 9,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R7-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R7-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R7-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R8-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R8-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R8-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R8-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R8-005",
+          "verdict": "still_open"
+        },
+        {
+          "id": "R8-006",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R9-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:675",
+          "requirement": "冻结计划要求本机 snapshot、baselineData 和 pending intent 保持原子一致，持久化失败不得产生半状态；hydrate 提升后的最终候选必须经过可验证的落盘边界。",
+          "evidence": "promoteHydratedPendingCandidate 先执行 snapshot = candidate，再以 `_ = WalletPersistence.saveLocal(...)` 忽略返回值，随后只在内存中执行 reconciliation。真实文件或 App Group 写入失败时，当前进程展示 candidate，而磁盘仍保存旧 snapshot/baseline/pending 组合；函数没有设置持久化失败状态或建立额外可恢复标记。现有 hydrate 测试只覆盖 saveLocal 成功的分支。",
+          "required_fix": "把 saveLocal 的成功结果纳入 hydrate 状态机：失败时不要无条件提交 candidate 为已落盘快照，或明确保留 pending、设置可重试的持久化失败态并保证重启后仍能恢复；增加 failsLocalWrites/真实文件失败后的内存、落盘和重启测试。"
+        }
+      ]
+    },
+    {
+      "round": 10,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R7-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R7-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R8-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R8-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R9-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R10-001",
+          "severity": "major",
+          "location": "src/core/SharedCore.swift:125",
+          "requirement": "冻结计划要求本机 baselineData 区分字段缺失与字段在场但不可用；损坏或未知载荷只能降级，不得在同步、冲突或旧版兼容路径中被静默清空或覆盖。",
+          "evidence": "Envelope.init(from:) 对 baselineData 使用 (try? container.decodeIfPresent(Data.self, forKey: .baselineData)) ?? nil。实际 envelope JSON 中 baselineData 为错误类型、非法 Base64 或 null 时，字段存在信息被丢失；若没有 sidecar，loadBaselinePayloadState 会在 :322-330 对 nil 返回 .missing。随后普通同步的 baselineAdoptionNeeded 会把远端 valid pair 当成需要采用，或把 missing 映射为 clear。现有 testEnvelopeDecodeToleratesBrokenBaselineValueInJSON 只断言 snapshot 仍可解码，没有断言 loadBaselinePayloadState 必须为 .invalid，也没有覆盖真实文件重启后的同步行为。",
+          "required_fix": "为 Envelope 增加字段存在/解码失败状态，外层 baselineData 解码失败必须进入 .invalid/fail-closed；preserve 不得把该状态改写成缺失。若原始 JSON 值需要保留，应保存原始字节或可恢复的 invalid marker。补充真实文件写入、重启、云端 valid/missing 同步和冲突测试，确认不会自动采用或清空。"
+        }
+      ]
+    },
+    {
+      "round": 11,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R10-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R7-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

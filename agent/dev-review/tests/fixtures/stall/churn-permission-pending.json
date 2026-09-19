@@ -1,0 +1,84 @@
+{
+  "scenario": "churn-permission-pending",
+  "provenance": {
+    "run": "c4p",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "docs/plans/plan-1.md:127",
+          "requirement": "冻结计划 §3：新装且云端有数据时显示等待授权态，并在允许、拒绝、系统设置开启后无需手动重试自动恢复",
+          "evidence": "PRD 中授权挂起、授权完成恢复、拒绝后设置恢复三项仍未勾选；开发交接 developer-r01.md:52 明确记录卸载重装、云端已有数据以及允许/拒绝/系统设置开启路径本轮未手测。现有测试只构造 CKError(.permissionFailure)，没有验证真实 CloudKit 授权弹窗期间的错误码、实际等待 UI 或自动恢复行为，因此也无法排除真实设备返回 .notAuthenticated 等错误码时当前映射仍显示未登录态。",
+          "required_fix": "在已登录 iCloud 且云端存在钱包记录的 iPhone 17 Pro 模拟器或真机上执行卸载重装专项：确认授权挂起期间显示等待态且不出现配置异常；分别验证允许、拒绝、从系统设置开启三条路径，并确认无需点击重试即可加载数据。记录实际 CloudKit 错误码；若实测不是 .permissionFailure，按该证据补充 kind(for:) 映射和判定矩阵测试，并更新 PRD/dev log 验收证据。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "minor",
+          "location": "tests/ModelTests.swift:3473",
+          "requirement": "冻结计划 §5：集成验证必须证明 CKAccountChanged 通知触发重新拉取",
+          "evidence": "testCloudAccountChangedNotificationTriggersImmediateRefresh 先调用 requestLocalSetup()，再发送通知。断言的 cloudAccountChangedHandlerCount 在生产回调中于 WalletCore.swift:1280、Task 调度前就递增；bootstrapState == .settingUp 也在通知前已成立。因此即使移除 WalletCore.swift:1282-1283 的 refreshFromPersistence() 调用，当前测试仍会通过，不能证明通知触发了 refresh、generation 更新或实际 fetch。",
+          "required_fix": "增加确定性的测试 seam，例如注入可替换的 CloudKit client/refresh hook 或记录 refresh 调用计数；让测试在非保护状态下断言通知导致 refresh/fetch 被调用并验证结果，同时保留当前 settingUp 保护态回归测试。"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 4,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R4-001",
+          "severity": "minor",
+          "location": "tests/ModelTests.swift:3506",
+          "requirement": "冻结计划 §5 单测/集成应能确定性覆盖新装无本机数据时的 CKAccountChanged → refresh → fetch → 状态迁移链路",
+          "evidence": "testCloudAccountChangedTriggersFetchInNonProtectedState 直接创建 WalletCore() 并断言 bootstrapState == .loading，但 WalletCore.init() 会从实际 App Group 读取 snapshot 和 queuedWrite（src/app/WalletCore.swift:1251-1264）。若开发机或模拟器已有钱包缓存、pending mutation 或 App Group 不可用，测试会在通知前失败，或无法覆盖预期路径。当前全量通过只说明本次测试容器为空，不能证明测试对手工授权回归环境可重复。",
+          "required_fix": "为测试提供隔离的持久化/初始状态注入或测试专用 Store factory，使该集成测试不依赖真实 App Group 残留；避免通过删除用户共享数据来获得空状态。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

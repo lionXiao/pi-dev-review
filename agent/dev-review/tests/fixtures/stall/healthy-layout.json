@@ -1,0 +1,131 @@
+{
+  "scenario": "healthy-layout",
+  "provenance": {
+    "run": "b1b",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/ui/HomeScreen.swift:159",
+          "requirement": "冻结计划 §2.2：不改 macOS",
+          "evidence": "新增的 WalletPanel、HeroGauge、目标期布局和动画全部位于共享 HomeScreen，未使用平台条件。RootScreen 在 macOS 主窗口同样实例化 HomeScreen，因此 macOS 主窗口首页实际会获得本轮 iOS 首页结构和动效，交接中“未改 macOS 行为”的声明不成立。",
+          "required_fix": "按冻结计划将新增首页结构和动效限制在 iOS，保留 macOS 首页原有表现；或者先修改冻结计划明确将 macOS 主窗口纳入本批，并补充对应的 macOS 视觉和交互验收证据。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "major",
+          "location": "src/ui/HomeScreen.swift:521",
+          "requirement": "冻结计划 §1.5、§2.5：动效按 design-system 动效清单执行；仅允许 transform/opacity",
+          "evidence": "introSweep 和 valueChange 通过 animatedWalletMonths 驱动 WalletHeroGauge.progress，而 src/ui/DesignSystem.swift:1137 使用 Capsule.frame(width: proxy.size.width * progress)。这会在动画期间改变填充条的布局宽度，直接违反 design-system.md 的“只动 transform / opacity，不动布局属性”约束。交接文档已承认这一偏差，但未处理。",
+          "required_fix": "改用固定布局尺寸下的 transform 或不会改变布局的自定义可动画绘制实现，并保持左端锚定和圆角可读性；补充运行时或测试证据确认冷启动和数值变化路径不再动画 frame width。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "minor",
+          "location": "src/ui/HomeScreen.swift:287",
+          "requirement": "冻结计划 §1.5：Reduce Motion 下全部直接切换",
+          "evidence": "gaugeWalletMonths 在 animatedWalletMonths 非 nil 时始终返回该状态值，忽略 motionEnabled。若用户在刻度尺扫过或数值动画期间开启 Reduce Motion，环境会变为 false，但没有 onChange 将刻度尺吸附到 projection.displayWalletMonths，也没有清理 isSweepInFlight；当前页面可能停留在中间值。",
+          "required_fix": "监听 Reduce Motion 或 motionEnabled 的关闭变化，在 withAnimation(nil) 中同步设置最终刻度值、statusBadgeScale = 1 并清除 isSweepInFlight；同时确保后续新状态更新继续走无动画路径。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "minor",
+          "location": "src/ui/HomeScreen.swift:545",
+          "requirement": "冻结计划 §1.5：状态跨档时徽标 crossfade + 轻微 scale",
+          "evidence": "playStatusPulseIfNeeded 在同一个回调中同步写入 statusBadgeScale = 0.94，随后立即写回 1。SwiftUI 可能在下一次渲染前合并这两个状态变化，最终状态与初始状态相同，因而无法保证出现 0.94 的中间帧，徽标 scale 脉冲可能完全不可见。",
+          "required_fix": "使用动画 completion、明确延迟的异步状态更新或其他串行机制，先可靠呈现缩放到 0.94，再在 0.11 秒后恢复到 1，并覆盖快速连续跨档场景。"
+        },
+        {
+          "id": "R1-005",
+          "severity": "minor",
+          "location": "src/ui/HomeScreen.swift:322",
+          "requirement": "冻结计划 §1.2、§2.7：过期状态在页面内只保留一处提示",
+          "evidence": "首页新增的 WalletInlineNotice 已显示唯一可见过期提示，但 StatusHero 仍调用共享 projectionAccessibilityValue；该摘要在 app/Core/WalletFormatting+Accessibility.swift:57 通过 relativeUpdateDate 生成“建议更新 · 8 天前更新”。因此在容器 VoiceOver 值被读出时，过期状态会先出现在 Hero 摘要中，再由基线区提示条重复读出。",
+          "required_fix": "为 HomeScreen 提供不包含“建议更新”动作短语的专用辅助功能摘要，保留共享 MenuBar/Widget 的原有语义；让基线区 WalletInlineNotice 成为首页 VoiceOver 中唯一的过期状态提示。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-005",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "major",
+          "location": "src/ui/HomeScreen.swift:635",
+          "requirement": "冻结计划 §2.3：token 唯一实现点，所有尺寸和圆角不得出现新增裸值；验收要求 zero new naked values",
+          "evidence": "新增的 iOS StatusHero 分支在 HomeScreen.swift:388、396、631-638 直接使用 31、24、10、7、cornerRadius: 9 等尺寸。尤其 HomeScreen.swift:635 和 638 的两个 cornerRadius: 9 是本轮新增的 iOS 代码，不是基线 macOS 分支原有代码。standards-check.sh 也在这些位置报告了 B-DS1 裸值命中，交接中将其全部归为既有项并不准确。",
+          "required_fix": "为 hero 内边距、间距和状态徽标圆角补充或复用 WalletLayout token，或抽出共享状态徽标组件避免复制裸值；确认新增 iOS 分支不再引入未定义的设计尺寸，并重新运行 standards-check.sh。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "minor",
+          "location": "src/ui/HomeScreen.swift:731",
+          "requirement": "冻结计划 §1.4：估算态单一信号；设计系统辅助功能摘要必须与可见估算文案一致",
+          "evidence": "可见 hero 信号在 HomeScreen.swift:380 使用 WalletFormatting.estimationHeroLine，文本为「估算中 · 基准 <日期>」；首页父级辅助功能摘要在 HomeScreen.swift:731 却使用 estimationBasisText，文本为「估算 · 基准 <日期>」。同时 HomeScreen.swift:407 使用 children: .contain，估算 Label 子元素仍在辅助功能树中，因此 VoiceOver 可能先读父摘要中的估算说明，再读可见估算信号，形成措辞不一致且重复的状态提示。",
+          "required_fix": "统一首页辅助功能摘要与可见的 estimationHeroLine 文案，并在父摘要或估算 Label 子元素中只保留一个估算状态播报来源，确保估算态单一信号。"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 5,
+      "decision": "pass",
+      "verdicts": [],
+      "findings": []
+    }
+  ]
+}

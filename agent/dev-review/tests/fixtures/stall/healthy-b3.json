@@ -1,0 +1,69 @@
+{
+  "scenario": "healthy-b3",
+  "provenance": {
+    "run": "b3",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "minor",
+          "location": "docs/plans/refactor-log.md:280",
+          "requirement": "冻结计划 §7 要求 refactor log 完整记录批次证据、截图目录和结论，并保持可复现",
+          "evidence": "该变更记录写明新增 agent-run 目录为 48 个文件；实际 docs/prd/screenshots/v1.2-s0-batch3/agent-run/ 包含 63 个文件（29 个 PNG、29 个 readout、4 个汇总/断言文件和 1 个 README），agent-run/README.md 也明确记录为 63 个文件。",
+          "required_fix": "将 48 修正为 63，或明确说明 48 所代表的子集并与目录实际内容、README 和 handoff 统一；不要留下无法由 find 命令复现的数量。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-s3/README.md:84",
+          "requirement": "冻结计划 §6 要求 L1 agent 侧覆盖和未覆盖项、截图证据及结论准确对应",
+          "evidence": "README §4 仍写明 UI-2 的 AX5/说明 Sheet 和 UI-3 UI 交互链路未执行，但同一目录已有 agent-run/UI2-*、UI7-*、H2-*.png/readout.txt，且 §5 及 agent-run/README.md 已记录这些项目由 dev agent 完成。该表未标明是用户裁决前的历史状态，因此与最终覆盖结论矛盾。",
+          "required_fix": "更新 §4 为当前最终覆盖状态，或明确标注为“裁决前初始覆盖记录”；保留当前未覆盖的 44pt 几何命中、显示单位分段控件、保存/取消及真机专属项。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R5-001",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-s3/README.md:86",
+          "requirement": "冻结计划 §6 要求 UI-2 的状态覆盖口径明确且证据与结论准确对应。",
+          "evidence": "冻结计划 .ai-dev-review/b3--3535d49a/inputs/plan-v1.md:94 和 README:86 将 UI-2 写成六档状态，但 README 同一行实际说明为 5 档 demo 状态；app/Core/WalletStatusThresholds.swift:5-10 只有 surplus、stable、watch、warning、critical 五个状态，ModelTests.swift:461、643-676 也只验证五档。当前纯搬迁批次没有第六档定义、实现或证据。",
+          "required_fix": "由用户明确“六档”是否为冻结计划笔误：若沿用现有产品和基线，将计划/README/相关日志统一为五档并按五档证据验收；若确实要求六档，先修订计划并定义第六档，再扩展实现、测试和截图范围，当前纯搬迁不能直接宣称满足六档覆盖。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R5-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

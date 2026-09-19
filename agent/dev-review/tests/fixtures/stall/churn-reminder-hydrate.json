@@ -1,0 +1,225 @@
+{
+  "scenario": "churn-reminder-hydrate",
+  "provenance": {
+    "run": "be1f",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:500",
+          "requirement": "F8 §2A 事件矩阵的「重启 hydrate」行与 INV-2：未确认提醒失败反馈在重启后保留",
+          "evidence": "`WalletCore.init` 只从 `WalletPersistence` 加载快照和 `queuedWrite`；`reminderState` 每次都从空状态创建，而 `WalletPersistence.Envelope` 也没有 `ReminderFailure` 或其确认状态。正常权限拒绝并完成关闭候选落盘后重新创建 store，`reminderNotice` 和 `reminderErrorMessage` 都会丢失，用户看不到未确认的失败原因。",
+          "required_fix": "在不修改 `WalletSnapshot` / CloudKit schema 的前提下，为当前钱包持久化提醒失败事件及两条确认状态，并在 hydrate 后、自动排程前恢复；排程成功、钱包终结和无快照时按协调器事件清理。新增真实重启回归，覆盖未确认和已确认两种状态。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:461",
+          "requirement": "F8 INV-1：失败封闭必须覆盖本机 envelope、待写队列和重启 hydrate",
+          "evidence": "当关闭候选的第一次 `WalletPersistence.saveLocal` 失败时，`performLocalReminderPersist` 只把关闭快照和补写状态放进内存；磁盘上的 envelope 仍可能是 `reminderEnabled == true`，且没有待写候选。`WalletCore.init` 的防复活过滤只处理已加载的 `.save` pending，因此该场景重启时会在 `scheduleReminder()` 看到开启快照并重新发起排程，可能在没有新的用户开启操作或 `.scheduled` 成功证据前重新启用提醒。",
+          "required_fix": "持久化一个可在启动时读取的关闭意图/失败封闭标记，或采用等价的持久化成功凭据，使本机写入失败后的重启先保持关闭并登记可恢复的关闭操作；启动 hydrate 和场景恢复必须继续补写，而不是直接按旧的开启 envelope 排程。新增「失败后立即终止进程再启动」回归。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:491",
+          "requirement": "F8 §2A 单一 `ReminderSyncOperation` 与 INV-4：存储恢复重放不得覆盖后续用户提交",
+          "evidence": "存储恢复事件会从 `applySnapshot` 反复触发。若关闭操作已进入 `retryPending`，用户随后提交新的设置值，`reconciledPendingMutation` 会保留新的 pending，但 `performLocalReminderPersist` 仍以旧 operation 的 `candidate` 调用 `applySnapshot(operation.candidate)`，将 `store.snapshot` 回退到旧候选，并用旧快照写 envelope。该交错发生在同一主线程同步调用链中，现有测试只覆盖恢复前没有新候选的情况。",
+          "required_fix": "为补写操作增加明确的操作身份/候选一致性检查；恢复时只重放仍是当前 pending 的 operation，若 pending 已被替换则以当前候选为准，禁止应用旧 `operation.candidate`。补充「本机落盘失败后提交新的现金/偏好，再触发 storageRecovered」回归并断言快照、pending 和 envelope 三者一致。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:528",
+          "requirement": "F8 §2A 的 `remoteSnapshotApplied` 事件及矩阵「远端开着、本机关闭：意图优先」",
+          "evidence": "当前 `WalletReminderEvent` 没有 `remoteSnapshotApplied`，远端快照直接进入 `applySnapshot(cloudSnapshot)`。当本机失败后的关闭候选已经成功上传并清空 pending、但失败反馈仍未被 `.scheduled` 清理时，本机 `reminderState.intent.enabled` 仍为 false；随后远端开启快照会直接被应用，`applySnapshot` 调用 `.intentEnabled`，清掉当前失败并重新排程，违反矩阵要求的本机关闭意图优先。",
+          "required_fix": "把远端合并显式路由为协调器事件，并在远端开启与本机未恢复的关闭意图/失败状态冲突时保持关闭或进入明确决策状态；不得通过通用 `applySnapshot` 直接触发 `.intentEnabled`。增加远端开启、本机关闭且无 pending 的回归。"
+        },
+        {
+          "id": "R1-005",
+          "severity": "major",
+          "location": "src/app/ReminderService.swift:300",
+          "requirement": "F8 INV-2：不在设置页时失败必须保留 alert 兜底；非 `.scheduled` 事件不得静默丢失反馈",
+          "evidence": "`alertChannelSuppressed` 会把当前失败的 `requiresAlertFallback` 设为 false。该事件在 `WalletCore+Writes.swift:214`、`:313`、`:344`、`:372` 和 `:558` 等所有普通保存入口开始时触发，而不是只在提醒成功或用户确认时触发。于是设置页不在场时，普通现金/消费/偏好保存可以在未确认提醒失败、也没有 `.scheduled` 证据的情况下隐藏唯一的全局 alert。macOS 主窗口关闭或从菜单栏执行消费时尤其容易发生。",
+          "required_fix": "移除普通数据 mutation 对提醒失败 alert 通道的无条件抑制；只允许用户明确确认、提醒成功排程或钱包终结清理对应通道。补充设置页不在场时先产生提醒失败、再执行普通保存的回归。"
+        },
+        {
+          "id": "R1-006",
+          "severity": "minor",
+          "location": "tests/PageSnapshotTests.swift:90",
+          "requirement": "F8 设置页证据：权限失败后开关弹回并与行内解释保持一致",
+          "evidence": "`makeReminderNoticeStore()` 从 `makeReminderStore()` 得到 `reminderEnabled == true`，随后只调用 `applyReminderFeedback(.inline(...))`，该测试缝不会把快照关闭。当前 `testSettingsReminderInlineAndPermissionNotice` 基线因此同时显示开启的「到期提醒」开关和文案「已关闭每日提醒」，与实际失败链路及 F8 验收口径矛盾。",
+          "required_fix": "让快照 fixture 使用关闭的提醒快照，同时保留失败反馈，或复用真实 fail-closed 证据入口；更新浅色/深色基线，并增加断言确保提示存在时 `reminderEnabled == false`。"
+        },
+        {
+          "id": "R1-007",
+          "severity": "minor",
+          "location": "tests/PageSnapshotTests.swift:13",
+          "requirement": "F13 §2B §7：三态快照和普通页面快照必须可重复、与外部本机偏好隔离",
+          "evidence": "页面快照 `setUp` 只安装了 `WalletPersistence.inMemoryStore`，没有隔离 `WalletAppearanceStorage`。F13 快照用例在未启用 `inMemoryValue` 时直接给 `store.appearancePreference` 赋值，会写入真实 `UserDefaults.standard`；一次快照运行或此前手动运行 App 留下的浅色/深色偏好可能影响后续普通设置和首页快照。",
+          "required_fix": "在页面快照 setUp/tearDown 中为 `WalletAppearanceStorage` 安装并清理 DEBUG 内存缝，或使用独立的测试 UserDefaults，确保所有普通快照默认处于 `.system`。"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-005",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-006",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-007",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R2-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:562",
+          "requirement": "F8 §2A §3：启动 hydrate 也必须只发布 ReminderEvent，由单一协调器迁移状态并由单点 apply 执行副作用",
+          "evidence": "事件枚举没有计划要求的通用 `.hydrated` 事件，只有 `.hydratedBlockingReenable`；启动恢复函数直接赋值 `reminderState.failure`、`intent`、`sync`、`snapshot`、`queuedWrite`，并直接调用 `WalletPersistence.saveLocal`（`src/app/WalletCore+Reminders.swift:569-595`）。该入口绕过了 `ReminderService.reconcile` 和统一 effects apply，导致持久化的 `saveFailure` alert/source 未被恢复，并使 hydrate 的队列决策无法与其它事件共享同一迁移逻辑。",
+          "required_fix": "增加承载持久化状态和队列提升决策的 `.hydrated` 事件，让协调器统一产生恢复、关闭收敛和清理效果；hydrate 不应直接修改提醒状态或直接执行提醒持久化。补充启动时基础失败、保存失败、旧开启 envelope、残留开启 pending 等组合的表驱动和真实重建回归。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-005",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-001",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:568-589",
+          "requirement": "F8 §2A §5 hydrate 矩阵：阻止开启候选时必须保持内存快照、本机 envelope 和待写队列的一致性，并保留 pending 中其它本地修改",
+          "evidence": ".blockReenable 只把当前 pending 的 reminderEnabled 改为 false 并写回 pending，未将关闭后的完整候选赋给 snapshot；因此在 envelope 为 cash=100000、pending candidate 为 cash=120000 且 reminderEnabled=true 的场景中，WalletCore.init 结束后内存仍显示旧现金 100000，而 pending 已是现金 120000。之后 applySettingsCommit 从旧 snapshot 构造新 candidate，queuedWriteForLocalSave 在 :830-837 用该 candidate 整体替换现有 pending，用户修改其它字段时会覆盖并丢失原 pending 的现金 120000。现有 testHydrateDoesNotReviveReminderEnabledPendingCandidateOverClosedEnvelope 只断言 pending 的 cash，没有断言 store.snapshot，也未覆盖后续提交。",
+          "required_fix": "在 .blockReenable 中以当前 pending candidate 为基础仅关闭提醒，并同时更新内存 snapshot、queuedWrite 和本机 envelope，保留现金等其它字段及原始 base；确保 hydrate 后 UI 与待写候选一致。增加残留开启 pending 带其它字段修改、hydrate 后再提交另一字段的集成回归，断言修改不会丢失。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:580-589",
+          "requirement": "F8 INV-1 与 §2A §4：hydrate 的关闭意图必须使持久化 envelope 和 pending 关闭；本机写入失败必须保留可重放的关闭操作",
+          "evidence": ".blockReenable 在 :588 先修改内存 pending，再在 :589 忽略 WalletPersistence.saveLocal 的 Bool 结果，且没有创建 ReminderSyncOperation 或 retryPending 登记。WalletPersistence.saveLocal 在 src/core/SharedCore.swift:174-180 遇到本机写入失败时不会更新持久化 envelope。对于关闭 envelope 加残留开启 pending、failsLocalWrites=true 的 hydrate，内存 pending 虽关闭，磁盘 pending 仍开启；随后最终 scheduleReminder 和 storageRecovered 没有可重放 sync，因而不会通过同一协调器补写。带 persisted failure 且 pending candidate 与关闭 operation 不同的组合还会被嵌套 replay 守卫先清掉旧 sync，再进入这个忽略写失败的分支。",
+          "required_fix": "把 blockReenable 建模为协调器可追踪的关闭 ReminderSyncOperation 或等价 effect；本机写入失败时设置 retryPending，storageRecovered 必须重放相同 operation，成功后再清除登记。apply 时检查写入结果并保持内存、磁盘 envelope、pending 三者一致。增加 failsLocalWrites 从 hydrate 到恢复重放的真实回归，覆盖有无 persisted failure 及 pending candidate 含其它字段的组合。"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R2-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R4-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:507",
+          "requirement": "F8 §2A §4/§5：删除意图在场的失败关闭必须保持 retryPending，并由 storageRecovered 重放；在任何观察点内存快照、本机 envelope、待写队列和提醒状态必须失败封闭且一致。",
+          "evidence": "可达场景为：本机已有 reminderEnabled == true 的 envelope 和 .delete pending，提醒失败发生在待清除窗口内，随后 saveLocal 失败。重启 hydrate 会创建关闭 operation，performLocalReminderPersist 先把内存快照设为关闭，再由 applySnapshot 在 src/app/WalletCore.swift:786-790 触发 storageRecovered。此时 replay 看到当前 pending 是 .delete，按 :507-510 直接清除 sync；随后原始 saveLocal 返回 false，无法重新登记有效 retryPending。存储恢复后没有 operation 可重放，本机 envelope 仍可能是 reminderEnabled == true，且该问题未被当前 540 条 iOS 测试覆盖。",
+          "required_fix": "为 ReminderSyncOperation 保留可重放的持久化上下文，或让 replay 明确支持保留 .delete pending 的 local-only 写入；不要把 .delete 当作无效 replay 而清除当前 operation。将 storageRecovered 的触发安排在初次本机写入之后，或在嵌套回调中核对并保留当前 operation。新增上述 hydrate、失败、恢复和队列一致性断言。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R5-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:504",
+          "requirement": "F8 §2A INV-1/INV-4 与 §3/§4：deleteIntentCreated 必须使旧关闭操作失效；storageRecovered 只能重放当前且基线仍匹配的 ReminderSyncOperation，远端合并不得回退其它字段。",
+          "evidence": "ReminderService.swift:389-392 的 deleteIntentCreated 只把 inFlightFailureOperationIsCurrent 设为 false，却保留 state.sync。随后 ReminderService.swift:375-377 的 storageRecovered 只检查 sync.retryPending，不检查该失效标志。WalletCore+Reminders.swift:504 的重放守卫也只比较 currentSync == operation；:513-518 更把任意 .delete 队列视为有效，没有核对删除意图的基线或代际。因此可达序列为：旧关闭操作 retryPending → deleteIntentCreated → storageRecovered；旧 operation 仍会被写入。若删除冲突后 keepPendingDelete 应用了提醒已关闭但现金等字段更新的远端快照，后续 storageRecovered 还可能把旧的完整 operation.candidate 写回内存与本机信封，覆盖较新的字段。现有 testCoordinatorLifecycleForDeleteIntentWalletTerminationAndSaveFailure 只断言失效标志，没有继续验证 storageRecovered，因此全量 542/542 未覆盖该序列。",
+          "required_fix": "在 deleteIntentCreated 时清除或以不可复用的代际令牌使旧 ReminderSyncOperation 失效，并让 storageRecovered/performLocalReminderPersist 在重放前检查该令牌；删除意图建立后新产生的合法失败操作必须重新标记为 current，hydrate 新建的操作也必须标记为 current。对仍有效的 .delete 重放核对删除意图身份/基线，或在远端快照合并后先把关闭候选 rebase 到最新快照再写入。新增旧 retryPending → deleteIntentCreated → storageRecovered 的 no-op 回归，以及删除冲突收到提醒已关闭且其它字段更新的远端快照时不得回退字段的回归。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R5-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

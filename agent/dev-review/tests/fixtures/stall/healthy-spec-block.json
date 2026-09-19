@@ -1,0 +1,23 @@
+{
+  "scenario": "healthy-spec-block",
+  "provenance": {
+    "run": "b4",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "spec_blocked",
+      "verdicts": [],
+      "findings": []
+    },
+    {
+      "round": 2,
+      "decision": "pass",
+      "verdicts": [],
+      "findings": []
+    }
+  ]
+}

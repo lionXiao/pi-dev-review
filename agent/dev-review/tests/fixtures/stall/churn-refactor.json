@@ -1,0 +1,91 @@
+{
+  "scenario": "churn-refactor",
+  "provenance": {
+    "run": "r76",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "docs/plans/refactor-log.md:45",
+          "requirement": "冻结计划 §3 批 1 验收标准及 §5 L1 UI 回归：批 1 的 L0 + L1 子集通过，并与基线保持同值、同文案、同布局",
+          "evidence": "日志明确记录 L1 为“待人工”，目前只有快照自动化前置证据。试算输入、损失天数与新预算、“只是试算”不落数据、“我已经买了”写回，以及设置金额编辑、保存/取消、未保存内容不被后台同步覆盖均未执行或留证；批 1 截图目录也不存在。",
+          "required_fix": "使用模拟器按 UI-1/UI-3/UI-4 影响范围完成人工回归，使用 simctl 保存截图并与批 0 基线逐项比对，覆盖引导页/试算页焦点与输入、试算结果和写回行为、设置保存取消及同步覆盖行为；随后回填 refactor log 并生成 HUMAN_REVIEW.md。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "major",
+          "location": "docs/plans/refactor-log.md:9",
+          "requirement": "冻结计划 §3 批 0 验收、§5 证据留档及 §8 完成定义：批 0 基线文档与截图集必须存在，后续批次的 L1 对照证据必须可追溯",
+          "evidence": "批 0 小节仍标记为待主 agent 回填，仓库中没有批 0 或批 1 的 v1.2 simctl 截图目录，也没有 HUMAN_REVIEW.md。当前提交的快照测试只能证明现有 XCTest 基线未变化，不能替代冻结计划要求的人工基线和交互流程证据。",
+          "required_fix": "在评审循环外补齐批 0 基线文档、303/303 实测、快照清单和截图目录；性能数据若条件不满足则按计划明确记录为遗留。完成批 1 L1 后，将截图路径、结果和结论写入 refactor log，并补交 HUMAN_REVIEW.md。"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 4,
+      "decision": "spec_blocked",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "still_open"
+        }
+      ],
+      "findings": []
+    },
+    {
+      "round": 6,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R6-001",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-s1/HUMAN_REVIEW.md:3",
+          "requirement": "冻结计划 §5“证据留档”要求批次人工复核证据可追溯，复核文档应能访问对应的重构日志。",
+          "evidence": "该行的链接为 [重构日志](../v1.2-refactor-log.md)。从 docs/prd/screenshots/v1.2-s0-batch1/ 解析后指向不存在的 docs/prd/screenshots/v1.2-refactor-log.md；实际文件位于 docs/plans/refactor-log.md。该文档其他位置使用 ../../v1.2-refactor-log.md 才能正确解析。",
+          "required_fix": "将 HUMAN_REVIEW.md:3 的链接目标改为 ../../v1.2-refactor-log.md，并运行相对链接检查确认该文档及冻结计划链接均可访问；不要改动已完成的人工签核结论。"
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R6-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

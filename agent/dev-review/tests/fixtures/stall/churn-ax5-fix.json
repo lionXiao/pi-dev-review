@@ -1,0 +1,121 @@
+{
+  "scenario": "churn-ax5-fix",
+  "provenance": {
+    "run": "b1c",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:261",
+          "requirement": "冻结计划 §1.3、§2.5：非决策类才改为首页行内提示；冲突、云端损坏和无法继续的同步失败必须保留 alert，且「不再提醒」按真实状态类型记录。",
+          "evidence": "只要存在 queuedWrite，代码就无条件清除 queuedConflict，并以 kind=.offline 生成行内提示。queuedWrite 也会由同文件的冲突、云端损坏和其他决策类分支产生；此外，原始失败可能是 notSignedIn 或 permission，但该分支无法保留真实分类。用户在冲突选择「稍后处理」后再次保存时，冲突会被降级为离线提示，既没有决策类 alert，也会错误影响静音状态类型。",
+          "required_fix": "保存 queuedWrite 的来源或当前失败分类，并仅对已确认的非决策类可用性失败路由到行内提示；冲突、损坏、删除和无法继续的 pending 状态必须继续保留 pending conflict/dataError alert，不能无条件清除 queuedConflict。补充“冲突/损坏后再次保存”和“未登录/无权限 pending 后再次保存”的回归测试。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "minor",
+          "location": "src/app/WalletCore+Writes.swift:292",
+          "requirement": "冻结计划 §1.3：同步状态变化后应移除过期的「当前使用本机数据」提示；非决策类提示不能在云端同步成功后继续显示。",
+          "evidence": "CloudKit save 成功后只保存快照并调用 applySnapshot，未调用 clearCloudAvailabilityNotice；applySnapshot 本身也不会清除该状态。因此在先发生离线 fetch、首页出现行内提示，随后网络恢复并成功保存设置或确认消费的路径中，首页仍会显示旧的“当前使用本机数据”提示，直到下一次 fetch。retryPendingSave 和 adoptPendingConflict 的直接成功路径也有同样遗漏。",
+          "required_fix": "在确认 CloudKit save/fetch 成功且本机缓存成功更新的所有路径清除 cloud availability notice，同时保留纯本机 pending 写入路径的提示。补充“离线提示 → 成功同步 → 提示消失”的状态测试。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:300",
+          "requirement": "冻结计划 §1.3、§2.5：决策类 alert 与行内提示互斥，同一状态只出现一处信号。",
+          "evidence": "cloudAvailabilityNotice 只检查 dataErrorMessage 是否为空，没有检查 queuedConflict。clearAllData、retryPendingDelete 等冲突路径会设置 queuedConflict、显示 RootScreen 的冲突 alert，但不设置 dataErrorMessage，也不清除已有 storedCloudAvailabilityNotice。已有离线行内提示因此会与冲突 alert 同时存在；关闭/延后冲突后旧提示还可能重新出现。",
+          "required_fix": "所有进入 queuedConflict 的路径立即清除行内提示，并让 cloudAvailabilityNotice 在 queuedConflict 存在或正在关闭时返回 nil；同时避免冲突被延后后重新显示旧的可用性提示。补充“已有离线提示 → 清除操作冲突”的互斥回归测试。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "major",
+          "location": "src/ui/PurchaseSimScreen.swift:148",
+          "requirement": "冻结计划 §1.2 第 2 条：点输入框以外的空白处必须收键盘。",
+          "evidence": "onTapGesture 和 contentShape 挂在内容 VStack 上，只覆盖 VStack 自身的内容边界。键盘弹出并升到 large detent 后，ScrollView 视口中位于内容 VStack 之外的空白区域不属于该命中区域，点击那里不会触发 isAmountFocused=false。交接中的 07 截图实际点击的是提示文案，不足以证明真正空白区域可用。",
+          "required_fix": "将收键盘点击手势挂到覆盖整个 ScrollView 视口的背景/容器上，继续用金额输入框的 global frame 排除输入框本体，并验证输入框外上下左右及键盘弹出后的空白区域。补充对应的人工或 UI 交互证据。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "minor",
+          "location": "tests/ModelTests+EntryAndCloud.swift:484",
+          "requirement": "冻结计划 §1.3、§3 以及 R1-001 要求：未登录和无权限的 availability pending 在后续保存时都必须保持真实状态类型并继续走行内提示。",
+          "evidence": "testAvailabilityPendingKeepsRealKindAcrossFollowUpSaves 只使用 WalletCloudFailure(kind: .notSignedIn)。虽然 WalletCloudNoticeKind(failureKind:) 在 WalletCore+Sync.swift:12-35 静态映射了权限类，但没有回归测试验证权限类 pending 的首次保存、后续保存和按权限类型静默行为。",
+          "required_fix": "新增权限类 pending 回归测试，驱动 .permissionPending，必要时覆盖两个 networkPermission 变体，断言后续保存没有 alert、行内提示仍为 .permission，并验证 mute 只影响该状态类型。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R5-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Sync.swift:516",
+          "requirement": "冻结计划 §1.3、§2.5：冲突、云端损坏和无法继续的同步失败必须保留 alert；只有明确的未登录、无权限、离线可用性状态才可改为首页行内提示。",
+          "evidence": "reconcilePendingMutation 的 unavailable 分支不检查 pendingSyncAvailabilityKind 或 pending 的来源，统一调用 routeCloudAvailabilityFailure。冲突 pending 被「稍后处理」后，queuedConflict 已清空但 queuedWrite 仍存在；随后 fetch 成功进入 reconcile，若 save 返回 .unavailable(.notSignedIn/.network)，该分支会清除/显示可用性行内提示，用户看不到原冲突决策 alert。synchronizeWithCloud:231-240 对有本机 snapshot 的 fetch unavailable 也存在相同问题。现有测试只覆盖直接再次调用 persist，没有覆盖后台 reconcile 路径。",
+          "required_fix": "将 pending 来源状态带入两个同步 unavailable 分支，或统一抽出来源感知的路由函数。决策/未知来源必须设置 dataErrorMessage；已登记的可用性 pending 才能生成行内提示，并在状态类型变化时更新登记。为冲突和云端损坏 pending 增加后台 reconcile unavailable 回归测试，断言 cloudAvailabilityNotice 为 nil 且 dataErrorMessage 非 nil。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "pass",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": []
+    }
+  ]
+}

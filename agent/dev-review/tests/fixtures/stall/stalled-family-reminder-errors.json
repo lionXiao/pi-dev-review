@@ -1,0 +1,342 @@
+{
+  "scenario": "stalled-family-reminder-errors",
+  "provenance": {
+    "run": "b2c",
+    "sourceKind": "sanitized-dev-review-run",
+    "mapVersion": 1,
+    "note": "Paths and identifiers renamed by stall-fixture-map.json; requirement/evidence text retained because the detector consumes it. See README.md."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "decision": "fix_required",
+      "verdicts": [],
+      "findings": [
+        {
+          "id": "R1-001",
+          "severity": "major",
+          "location": "src/ui/SettingsScreen.swift:537",
+          "requirement": "F10 / F4：无快照时显示与估算页应可进入；导航入口和只读信息不得被全局只读状态禁用。",
+          "evidence": "整个 Form 被 .disabled(isReadOnly) 包裹。其下第 642、657、668、690、999 行的 .disabled(false) 不能恢复父级禁用状态，因为 SwiftUI 的 disabled 环境按父子值做 AND 合并。因此无快照时根页的显示与估算、数据与同步、五档阈值入口及 ICP 链接都不可操作，数据与同步页的清除按钮也仍被禁用。现有 testSettingsDisplayPageReadOnly 直接以 initialPage: .display 构造页面，未覆盖从无快照根页进入的真实路径。",
+          "required_fix": "将只读禁用范围从整个 Form 移到实际可写的 Section/控件上，明确保留入口行、只读关于内容和必要的退出/危险操作可用；补充无快照根页激活入口并进入显示页/数据与同步页的回归测试。"
+        },
+        {
+          "id": "R1-002",
+          "severity": "minor",
+          "location": "src/ui/SettingsScreen.swift:855",
+          "requirement": "方案 B 的自动估算区应呈现开关、估算基准和已估算天数各一份，并遵守一个状态一处提示。",
+          "evidence": "有效估算状态下 projectionToggleRow 同时显示 projectionCaption，其中包含估算基准和已估算天数；displaySections:1023-1025 又显示相同的估算基准和已估算行。testSettingsDisplayPage.1.png 已直接呈现这组重复信息，造成重复文案和不必要的页面高度。",
+          "required_fix": "有效估算状态下只保留一组基准/已估算字段，建议 projectionToggleRow 仅在不可用时显示原因，使用 displaySections 中的 LabeledContent 作为唯一估算元数据来源，并更新快照/断言。"
+        },
+        {
+          "id": "R1-003",
+          "severity": "minor",
+          "location": "src/app/WalletCore+Sync.swift:614",
+          "requirement": "F8 / F6：提醒错误反馈应随提醒恢复或数据删除清理，不得把旧错误带入新的钱包状态。",
+          "evidence": "确认删除时这里只取消 reminderTask、设置 snapshot = nil 并调用 scheduleReminder()；reminderNotice 和 reminderErrorMessage 都没有清空。scheduleReminder 的 nil/无效快照分支也只调用 ReminderScheduler.cancel，不调用 clearInlineNotice。用户在权限拒绝后保留行内提示，再清除并重新建立钱包时，旧的权限错误可能重新出现在新的提醒组中。",
+          "required_fix": "在确认删除及无快照/取消提醒的清理路径统一清除 reminderNotice 和 reminderErrorMessage，并增加拒绝提示、清除数据、重新建立钱包后的状态回归测试。"
+        },
+        {
+          "id": "R1-004",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-b/agent-run/README.md:22",
+          "requirement": "F12：删除页面后，截图参数、脚本、证据文档和测试口径不得继续指向已删除页面。",
+          "evidence": "capture-ios.sh 和 capture-macos.sh 的 PAGES 已是 root/thresholds/dataSync/display 四页，但 README 仍宣称 21 张截图、7 页并列出 reminders/about/displayUnit；HUMAN_REVIEW.md:3、:51、:62 还保留 5 个二级页和 testRootEntryNavigatesToDisplayAndReminderPagesOnIOS 的旧结论。当前文档没有将这些段落明确标为历史归档，足以误导后续验收。",
+          "required_fix": "把 b2b 证据包 README/HUMAN_REVIEW 全部更新为当前四页/三二级页 IA，删除或移入明确命名的历史归档目录，并确保当前文档不再宣称旧页面可用。"
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R1-004",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R3-001",
+          "severity": "major",
+          "location": "src/app/WalletCore.swift:559",
+          "requirement": "F8 / R1-003：提醒权限拒绝在设置页不在场时必须有不可静默的 alert 兜底，且旧钱包错误不得影响新钱包状态。",
+          "evidence": "WalletReminderFeedback.alert 在 src/app/WalletCore+Reminders.swift:129-137 设置 reminderErrorMessage，但 RootScreen 通过 userFacingErrorMessage 呈现 alert；userFacingErrorMessage 会在 :559 按文案过滤已确认过的错误，而 dismissUserFacingError 在 :639-648 将提醒文案加入 acknowledgedUserFacingErrors。删除路径只清 reminderNotice/reminderErrorMessage，不清该确认集合。可复现序列为：旧钱包在设置页外权限拒绝 -> 关闭 alert -> 删除钱包 -> 重建钱包 -> 新钱包再次在设置页外权限拒绝；此时虽然写入了新 reminderErrorMessage，RootScreen alert 仍不会出现。现有测试只断言字段为非 nil，没有断言 userFacingErrorMessage 或跨钱包重新提示。",
+          "required_fix": "将提醒确认状态按当前钱包或提醒事件 ID 管理，不要用跨钱包的裸文案过滤；在钱包删除/重建时重置提醒确认状态，并保证每次新的权限拒绝或再次尝试在设置页外仍能呈现 alert。新增“关闭旧 alert、删除并重建钱包、相同文案再次拒绝”回归测试，同时覆盖 inline 与 alert 两条通道。"
+        },
+        {
+          "id": "R3-002",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-c/HUMAN_REVIEW.md:17",
+          "requirement": "Q3 / §4：agent-run 验收证据必须准确记录当前门禁结果。",
+          "evidence": "当前验收记录 §0 和表格 1.1 在 :17、:30 仍写 iOS 488/488；同一文件 :95 又写随后 iOS 全量 490/490。独立复跑要求的门禁实际执行 490 个测试并全部通过，当前文档因此自相矛盾。",
+          "required_fix": "将当前验收记录中的 488/488 更新为实际 490/490，并同步检查测试分组明细、轮次说明和相关证据索引，避免把旧门禁结果作为当前结果。"
+        },
+        {
+          "id": "R3-003",
+          "severity": "minor",
+          "location": "docs/design-explore/picker.html:59",
+          "requirement": "F12：删除页面后的当前设计/证据口径不得继续指向已删除页面。",
+          "evidence": "该文件标题仍为“块 2b 设计稿（定案版）”，:59 写明“5 个二级页均可从根页进入”，:114-116 仍展示“预算档位与提醒”“关于”“显示单位（选择页）”三个已删除页面。当前 WalletSettingsPage 和截图脚本只有根页加三个二级页，且该定案稿未像 b2b 证据目录那样明确标为历史归档，后续验收或实现仍可能被其误导。",
+          "required_fix": "把 b2b-picker.html 的当前部分更新为根页 + 显示与估算/数据与同步/五档预算阈值三个二级页，明确提醒与关于行内、显示单位并入显示与估算页；旧页面图和说明移入明确命名的历史归档区，或将整个旧稿标为历史并从当前设计源链接中移除。"
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R4-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:225",
+          "requirement": "F8 / R3-001：权限拒绝在设置页在场时必须保留可解释的行内提示，在设置页不在场时必须提供不可静默的 alert 兜底。",
+          "evidence": "`handleReminderResult` 在 `:215` 先调用 `applyReminderFeedback` 发布失败反馈，然后在 `:225` 通过 `persist` 把 `reminderEnabled` 写为 false。`persist` 的各个保存分支会调用 `applySnapshot`，而 `WalletCore.swift:697` 会再次调用 `scheduleReminder()`；关闭快照会让 `ReminderScheduler.apply` 返回 `.disabled`，随后再次进入 `handleReminderResult`，由 `applyReminderFeedback(.clearInlineNotice)` 的 `:119-121` 清除刚生成的 `reminderNotice`、`reminderErrorMessage` 和确认状态。当前新增测试只直接调用 `applyReminderFeedback`，Debug 证据缝也在 `applySimulatedReminderPermissionDeniedForEvidence` 中直接赋值 `snapshot`，均绕过该真实路径。",
+          "required_fix": "为排程结果绑定操作/事件代际，使强制关闭后的 `.disabled` 结果不能清除当前失败事件；或调整关闭与失败反馈的顺序并保证取消旧排程不会清理新反馈。增加真实 scheduler -> persist -> reschedule 路径的 iOS/macOS 回归，断言设置页在场和不在场两条通道都可见、重复尝试仍可提示。"
+        },
+        {
+          "id": "R4-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:228",
+          "requirement": "F8 / R1-003：旧钱包的提醒错误不得在删除或重建后影响新钱包状态。",
+          "evidence": "`scheduleReminder` 只在异步任务进入 `handleReminderResult` 前按 `snapshot.revision` 做一次检查（`:199-204`）。`handleReminderResult` 等待 `persist` 后，在 `:228-233` 无条件把 `.conflict`、`.deleted` 或 `.unavailable` 映射为 `dataErrorMessage`。如果提醒状态保存正在等待 CloudKit 时用户确认删除，删除会替换 `queuedWrite`/代际并清除提醒字段；陈旧保存随后返回 `.conflict`，仍会写入“提醒状态保存时发现其他设备有更新”。`applyConfirmedDeletion` 的清理只处理提醒字段，不会阻止这条陈旧决策错误进入新钱包。",
+          "required_fix": "捕获提醒操作的当前钱包/Mutation 代际，并在每个异步结果分支返回后验证当前操作仍匹配；不匹配时整体忽略结果和错误写入。增加延迟提醒保存 -> 删除 -> 重建钱包的并发回归，断言 `reminderNotice`、`reminderErrorMessage`、相关 `dataErrorMessage` 和 alert 状态均不残留。"
+        },
+        {
+          "id": "R4-003",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-c/HUMAN_REVIEW.md:35",
+          "requirement": "Q3 / F8：agent-run 验收证据必须准确区分真实点击结果与模拟结果。",
+          "evidence": "当前表格把“开关弹回关闭”列为 F8 机器观测，但 `applySimulatedReminderPermissionDeniedForEvidence` 只是直接将 store 的 `snapshot.reminderEnabled` 写为 false，并没有操作 `SettingsScreen` 的本地绑定，也没有执行真实的 `handleReminderResult`/`persist` 链路。文件 `:84-94` 已承认系统权限弹窗的“不允许”点击未执行，因此该表格描述不能证明真实 UI 开关发生了弹回。",
+          "required_fix": "将表格观测改写为“模拟 OS 结果下 store 快照为关闭，非真实点击链路证据”，并在 R4-001 修复后通过输入注入或用户实测重新记录真实开关、提示和 alert 结果。"
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R4-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R4-003",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R5-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:320",
+          "requirement": "F8 / R4-001：被新提醒操作取代的旧异步结果不得向当前状态写入错误，重复尝试和恢复路径必须保持正确反馈。",
+          "evidence": "handleReminderResult 在 :287 只做一次完整 receipt 校验，随后发布失败反馈并 await persist。强制关闭会通过 applySnapshot 推进 reminderRequestGeneration，用户再次打开开关还会产生新的提醒事件；旧 persist 返回后 :320 只校验 walletGeneration，:325-330 会无条件把 .conflict/.deleted/.unavailable 映射为 dataErrorMessage。若新尝试已经成功清理提示，旧 CloudKit 冲突仍可随后弹出错误 alert；若新尝试仍在进行，旧错误也可覆盖当前行内通道。现有回归只覆盖强制关闭后的 .disabled 回声和删除发生在 CAS 已在途之后的场景。",
+          "required_fix": "携带独立的提醒失败事件 ID/操作代际，区分失败事件自身触发的强制关闭回声与用户的新提醒操作；在每个 await 返回后、尤其是 persist 返回后验证事件仍属于当前状态，陈旧结果整体 no-op。增加延迟旧提醒保存后再次尝试并成功/失败的确定性回归，断言 reminderNotice、reminderErrorMessage、dataErrorMessage 和 userFacingErrorMessage 不被旧结果污染。"
+        },
+        {
+          "id": "R5-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Writes.swift:583",
+          "requirement": "F8 / R1-003 / R4-002：删除或重建钱包后旧提醒错误不得进入新钱包状态。",
+          "evidence": "clearAllData 在 src/app/WalletCore+Queue.swift:117-135 建立 pending delete 并推进 mutationGeneration，但没有使 reminderRequestGeneration 或提醒事件失效。旧 scheduler 结果若此时返回，receipt 的 walletGeneration 和 snapshot revision 仍匹配，会进入 persist 的 pending-delete 分支 :583-592，直接写入 dataErrorMessage。随后 applyConfirmedDeletion :614-625 只调用 clearReminderFeedback，未清理该通用决策错误；删除完成和新钱包重建后该错误仍可由 userFacingErrorMessage 呈现。现有 R4-002 测试是在提醒保存已经取得 CAS 边界后才确认删除，未覆盖删除意图已建立但提醒处理尚未进入 persist 的窗口。",
+          "required_fix": "删除意图建立时立即使旧提醒结果失效，并在 persist 的所有早期分支之前验证提醒操作代际；补充 scheduler 回执延迟 → clearAllData 建立 pending delete → 删除确认 → 重建钱包的并发回归，断言所有提醒及通用错误/alert 状态均无残留。"
+        },
+        {
+          "id": "R5-003",
+          "severity": "minor",
+          "location": "docs/screenshots/batch-c/agent-run/README.md:160",
+          "requirement": "Q3 / F8：agent-run 验收证据必须准确区分真实点击结果、注入结果和未覆盖的真实链路。",
+          "evidence": "README 声称截图证据缝覆盖「persist 强制关闭快照」完整链路；但 src/app/WalletCore+Reminders.swift:182-195 的 applySimulatedReminderPermissionDeniedForEvidence 只调用 applyReminderFeedback、修改内存 current 后调用 applySnapshot，没有 WalletPersistence.saveLocal、persist 或 CloudKit 保存。它只覆盖注入 OS 结果、内存快照更新和重排程回声。HUMAN_REVIEW.md 其他段落虽然准确说明了未执行真实点击，文档内部仍存在链路范围冲突。",
+          "required_fix": "将该段改为准确描述「注入 OS 结果 + 直接 applySnapshot + 重排程回声」，并把 persist 链路证据仅归于定向测试；或者调整证据缝实际调用与生产相同的 persist 路径。"
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-003",
+          "verdict": "still_open"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "still_open"
+        },
+        {
+          "id": "R4-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R4-002",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R4-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R5-003",
+          "verdict": "verified_closed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R6-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:375",
+          "requirement": "F8 / F6 / R1-003 / R3-001：提醒失败错误必须随提醒恢复或钱包删除清理，不得污染新的钱包状态或被旧确认静音。",
+          "evidence": "提醒保存的 conflict/deleted/unavailable 结果在 :375-380 直接写入普通 dataErrorMessage。随后 .scheduled 只调用 clearReminderFeedback，而该方法只清理 reminderNotice、reminderErrorMessage、acknowledgedReminderNoticeID 和 activeReminderFailureEventID，不清理 dataErrorMessage。确认删除路径 :616-625 同样只清提醒字段和 availability/pendingUpload 错误，保留 decision 来源的提醒错误；dismissUserFacingError 还会把该错误加入 acknowledgedUserFacingErrors，而该集合跨钱包保留。可复现序列为：页外权限拒绝 -> 提醒保存冲突已返回 -> 之后提醒成功恢复或确认删除 -> 重建钱包；旧 dataErrorMessage 仍可展示，或同文案在新钱包中被旧确认静音。现有 R5 测试只把保存回执挂在删除/新尝试之前，未覆盖错误已经落地后的恢复和删除。",
+          "required_fix": "为提醒保存错误增加独立来源与事件/钱包代际，成功排程时清理当前提醒来源错误，钱包终结时清理旧钱包的提醒错误及对应确认状态；不要无条件清理无关 CloudKit 决策错误。增加已返回保存冲突后成功恢复、删除重建、旧 alert 已确认后新钱包再次失败三条确定性回归。"
+        },
+        {
+          "id": "R6-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:344",
+          "requirement": "F8 / F6：权限拒绝或排程失败时开关必须弹回关闭，并在设置上下文内给出可解释反馈。",
+          "evidence": "handleReminderResult 先发布失败反馈，然后在 :344 发现 pending delete 就直接 return；将 current.reminderEnabled = false 的逻辑位于 :350，因此删除意图期间的失败不会更新当前快照，也不会执行关闭开关的本机状态迁移。testReminderFailureDuringPendingDeleteDoesNotWriteGenericQueueError 只断言没有通用队列错误，没有断言 reminderEnabled 已关闭。若删除意图期间发生新的失败排程，设置页开关仍可能保持开启；随后取消删除时 discardPendingDelete 会保存这个仍开启的快照，而系统排程可能已经失败或被取消，形成 UI/快照与实际通知状态不一致。",
+          "required_fix": "在 pending delete 期间保留“不写普通队列错误”的保护，但仍同步把提醒状态收敛为关闭并触发 disabled/cancelled 回声，或建立等价的非队列本机状态；确保取消删除后关闭状态能够正确落盘。增加 pending delete -> permissionDenied -> 断言开关关闭 -> 取消删除的回归测试，并在冻结口径中明确该特殊窗口的处理。"
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-003",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R4-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-001",
+          "verdict": "partially_fixed"
+        },
+        {
+          "id": "R6-002",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R7-001",
+          "severity": "minor",
+          "location": "src/app/WalletCore.swift:779",
+          "requirement": "F8 / F6 / R1-003：提醒失败错误及其确认状态应随提醒恢复、钱包终结或重建清理，且不得污染新钱包或被旧确认静音。",
+          "evidence": "`dismissUserFacingError` 在 :773-774 保存提醒保存失败的确认事件，随后 :780 执行 `dataErrorMessage = nil`；该 setter 在 :220 将 `dataErrorMessageSource` 置为 nil，但不清理 `reminderErrorEventID` 或 `acknowledgedReminderErrorEventID`。因此用户关闭 alert 后再调用 `clearReminderFeedback()`，`clearReminderSaveFailureAlertIfNeeded()` 的 :301 守卫失败，两个旧 ID 会跨恢复/删除/重建继续留在 store。现有跨钱包测试只验证新事件能重新出现，没有验证确认 ID 已清零。",
+          "required_fix": "增加独立的提醒错误元数据清理入口，在提醒恢复、无快照、确认删除和重建时清理事件与确认 ID，同时保持普通 `.decision` 错误不受影响；补充 acknowledged reminder save failure -> recovery/delete/recreate 的回归。"
+        },
+        {
+          "id": "R7-002",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:418",
+          "requirement": "F8 / F6：权限拒绝或排程失败时开关必须弹回关闭，并在设置上下文内给出可解释反馈。",
+          "evidence": "失败结果先发布“已关闭每日提醒”的反馈并构造 `reminderEnabled = false` 的 candidate。待清除分支在 `WalletPersistence.saveLocal` 返回 false 时只设置普通决策错误并 return，没有 `applySnapshot(candidate)`；普通路径的本机保存失败分支（src/app/WalletCore+Writes.swift:612、:670、:693）同样在应用关闭 candidate 前返回。于是 App Group/磁盘写入失败时，通知请求已经失败或被移除，但当前快照和设置页开关仍可能为 true，与 F8 的 fail-closed 要求及提示文案不一致。现有 R6-002 回归使用可写内存后端，未覆盖 `failsLocalWrites`。",
+          "required_fix": "为提醒失败增加本机落盘失败时的明确 fail-closed 状态，至少同步关闭当前 UI 与系统排程，并保留单独的持久化失败反馈；存储恢复后再将关闭状态可靠落盘，避免重启重新读取开启状态。补充普通提醒失败和 pending-delete 提醒失败在 `saveLocal` 失败时的回归。"
+        }
+      ]
+    },
+    {
+      "round": 8,
+      "decision": "fix_required",
+      "verdicts": [
+        {
+          "id": "R1-003",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R3-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R6-002",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R7-001",
+          "verdict": "verified_closed"
+        },
+        {
+          "id": "R7-002",
+          "verdict": "partially_fixed"
+        }
+      ],
+      "findings": [
+        {
+          "id": "R8-001",
+          "severity": "major",
+          "location": "src/app/WalletCore+Reminders.swift:445",
+          "requirement": "F8 / F6 / R7-002：权限被拒或排程失败时开关必须弹回关闭，且存储恢复和重启后不得重新读回开启状态。",
+          "evidence": "真实设置流程中 applySettingsCommit(.reminder) 通过 deferUpload 在本机先保存一个 reminderEnabled=true 的 .save pending。若提醒失败后 persist 的 saveLocal 在 WalletCore+Writes.swift:612-614 失败，self.queuedWrite 仍保留开启候选；failClosedReminderDisabled 只把 snapshot 改为关闭，retryPendingReminderDisabledPersistIfNeeded 在 WalletCore+Reminders.swift:462 又以该旧 pending 写 envelope。之后 WalletCore.init 在 WalletCore.swift:529-533 会把 pending 的开启 candidate 提升回 snapshot，导致重启重新开启；flush 还可能把开启状态上传到 CloudKit。无 pending 时，补写以 nil pending 保存关闭快照，后续 CloudSync 在没有 pending 的分支仍可能用远端 reminderEnabled=true 覆盖本机关闭状态。",
+          "required_fix": "在 fail-closed 状态迁移中同步改写现有 .save pending 的 candidate，保留其 baseSnapshot 和非金融标记；无 pending 时记录带原始基线的提醒关闭待同步操作，或在该操作完成前阻止远端开启快照覆盖本机状态。补充 failsLocalWrites 下从设置开关真实建立 pending、存储恢复、重启、flush 及远端返回开启快照的确定性回归。"
+        }
+      ]
+    }
+  ]
+}
