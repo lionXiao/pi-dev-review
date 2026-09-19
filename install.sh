@@ -38,6 +38,12 @@ done
 cp "$SOURCE_DIR/agent/dev-review/prompts/developer.md" "$TARGET_ROOT/dev-review/prompts/developer.md"
 cp "$SOURCE_DIR/agent/dev-review/prompts/reviewer.md" "$TARGET_ROOT/dev-review/prompts/reviewer.md"
 cp "$SOURCE_DIR/agent/dev-review/tests/"*.test.mjs "$TARGET_ROOT/dev-review/tests/"
+# Fixtures and tools back the stall-detection tests and the fixture exporter; test
+# files alone would fail without them. `cp -R src/. dest/` merges contents and
+# avoids nesting on repeated installs without deleting stale files.
+mkdir -p "$TARGET_ROOT/dev-review/tests/fixtures" "$TARGET_ROOT/dev-review/tools"
+cp -R "$SOURCE_DIR/agent/dev-review/tests/fixtures/." "$TARGET_ROOT/dev-review/tests/fixtures/"
+cp -R "$SOURCE_DIR/agent/dev-review/tools/." "$TARGET_ROOT/dev-review/tools/"
 cp "$SOURCE_DIR/agent/extensions/dev-review-loop/index.ts" "$TARGET_ROOT/extensions/dev-review-loop/index.ts"
 cp "$SOURCE_DIR/agent/prompts/dev-review-plan.md" "$TARGET_ROOT/prompts/dev-review-plan.md"
 

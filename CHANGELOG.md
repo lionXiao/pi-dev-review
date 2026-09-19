@@ -10,6 +10,7 @@
   - **硬升级**：新 reason `stalled-issue-family`，复用现有 escalate/blockedNotice 通道；内容为机器生成的家族表（成员、首现轮、判定链、开放数、跨度、热态文件）+ 结构化三选项：① 授权一轮钉死范围的系统性修复（人写范围）；② 登记为已知限制并顺延后续批次；③ 修订计划/口径（附家族报告）。触发时机在 review 结束、下一轮开始前；同一实例连续 hard 触发仍由人 resolve 控制，不新增冷却逻辑；最后一轮同时命中 `max-rounds` 时优先输出停滞家族报告（阻断语义不变，只是停止原因更有信息量）。
   - **配置与观测**：`defaults.json` 新增 `stallGate`（`enabled: true` 时开启，`false` 完全关闭；阈值随实例冻结，`local.json` 可覆盖）；每次 soft/hard 触发追加一行 timeline（kind、家族成员、原因、是否注入）并写 `state.stallEvents[]`：事件里的 `clusters` 是家族 key，`members` 是该次命中所有家族的完整 finding ID 列表（timeline 摘要同时展开 key 与成员），为命中率/收敛率统计与「删除决策」留数据。旧实例没有 `findings.jsonl` 时视为空历史：不触发、不报错。
   - **测试**：新增 `tests/stall-detection.test.mjs`（fixture 回放与 labels 对齐、链接信号单测、父项闭合不复活、同轮关闭父项无半权、requirement 内标识符不参与 identSim、首次变热家族的 L3 候选、spec_blocked 不触发、已闭合成员判定链、hard 两轮窗口边界、零注入逐字节一致、配置关闭零触发、`repeat_of` 固化、三个引擎端到端注入/升级/不误升级用例）；既有 53 个测试保持全绿，共 70 个。
+  - **安装脚本**：`install.sh` 补拷 `tests/fixtures/` 与 `tools/`——此前只拷 `*.test.mjs`，安装副本里的停滞检测测试会因缺 fixture 而失败（用 `cp -R src/. dest/` 合并写入，重复安装不嵌套、不删旧文件）。
   - `prompts/developer.md` 与 `prompts/reviewer.md` 本批零改动：补偿文本只在检测命中时出现在任务包里，不是常驻教义。
 
 ## 0.11.0 — 2026-09-16
