@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — 停滞检测（stall detection）
+
+- **机械识别停滞家族，并在命中时只做软/硬两件事**（真实事故：b2a 19 轮、7 次人工加轮；b2c 8 轮，用户以「打地鼠」记录叫停；a3e2 11 轮、max_rounds 10→12。三次都是同一种失效模式：评审发现的是「下一条可达路径」，开发者只修被点名的那条，引擎对「同一根因家族跨轮存活」没有任何感知）。
+  - **数据层**：新增 `reports/findings.jsonl`（append-only，每轮 review 后追加一条 `{round, decision, verdicts, findings}`，字段与冻结 fixture 同构，fixture 可直接喂给检测器）；`state.openIssues` 每项新增派生字段 `partial_streak`（连续未闭合判定轮数）与 `rounds_open`，`issueSummary()` 一并带出，两个角色都能看到「这是第几轮尝试」。
+  - **检测器**（`detectStallClusters`，纯函数、无 LLM/网络/文件系统）：对每个新 finding 与其出现时仍未闭合的旧 finding 配对，信号为 `sameFile + 2·ref + [reqSim≥0.35] + [identSim≥0.08] + 0.5·parentOpen`，`score ≥ 1.75` 连边后 union-find 得家族；`identSim` 严格只取 `evidence+required_fix` 中长度 ≥5 的 ASCII 标识符（requirement 只由 reqSim 代表，不再混入 identifier 集合）；`spec_blocked` 轮的 finding 无代码信号，既不参与连接也不参与 `partial_streak` 触发（否则会出现 hard 命中但家族表为空的升级）。soft 触发：open issue `partial_streak ≥ 2`，或活跃家族（≥2 成员、至少一人未闭合）跨度 ≥ 3 轮；hard 触发：open issue `partial_streak ≥ 3`，或家族跨度 ≥ 4 轮、未闭合成员 ≥2 且最近两轮窗口（r-1 或 r）内出现新成员（不要求两轮都有）。仅在 `decision === "fix_required"` 的轮之后评估。
+  - **阈值标定**：初值来自会话回放，最终以 `tests/fixtures/stall/labels.json` 的 17 个标注 run 全绿为准（3 stalled / 6 churn / 8 healthy）；标定过程中保持 fixture 与标签零改动（不改标签、不改 fixture）。标定结论：家族跨度按「首现轮 → 当前评估轮」计算（活跃家族存活轮数）；父 finding 必须在新轮开始时仍未闭合，且 `parentOpen` 半权只在父项**熬过本轮 verdict** 时成立——本轮被 `verified_closed` 的父项不得靠同文件单信号连边。第二次标定（identSim 改为严格的 evidence+required_fix 后）：满足全部标签的参数空间是 `identSim ≤ 0.10` 且 `linkThreshold ∈ [1.6, 2.0]`；低于该空间 b2a 的 R17-001（其全部父项都在 r17 被关闭，只能靠同文件 + evidence 标识符 0.125 重叠连接）不再聚入标签家族，高于/收紧则会丢失某个 knownL2Misses 的 L3 候选覆盖。最终取 `identSim 0.08 / linkThreshold 1.75`：关键对恰好落在 0.10，1.75 又把「单弱信号 + parentOpen（1.5）」挡在门外，只放行两个弱信号或一个强信号（≥2.0）。由于不含 parentOpen 的得分恒为整数，1.75 下 parentOpen 半权在 fixture 语料上不改变任何单对判定，但它仍按公式参与评分，并在阈值为 1.5 的边界场景（回归测试使用）中决定结果。
+  - **软信号只注入命中轮的任务包**：`makeDeveloperTask` 追加 `STALL_DIRECTIVE`（家族级验收判据：根因不变量 + 边界清单 + 「已修/不可达/不在本批」结论；独立常量，删除不影响路由/升级/观测）；`makeReviewerTask` 在家族热态时追加未连接候选段，要求逐条确认或分离，确认为同源时在新 finding 上用 optional 字段 `repeat_of: "<family id>"` 声明（schema 层 optional，不影响既有输出）。不命中时两个任务包与关闭检测时逐字节一致。
+  - **硬升级**：新 reason `stalled-issue-family`，复用现有 escalate/blockedNotice 通道；内容为机器生成的家族表（成员、首现轮、判定链、开放数、跨度、热态文件）+ 结构化三选项：① 授权一轮钉死范围的系统性修复（人写范围）；② 登记为已知限制并顺延后续批次；③ 修订计划/口径（附家族报告）。触发时机在 review 结束、下一轮开始前；同一实例连续 hard 触发仍由人 resolve 控制，不新增冷却逻辑；最后一轮同时命中 `max-rounds` 时优先输出停滞家族报告（阻断语义不变，只是停止原因更有信息量）。
+  - **配置与观测**：`defaults.json` 新增 `stallGate`（`enabled: true` 时开启，`false` 完全关闭；阈值随实例冻结，`local.json` 可覆盖）；每次 soft/hard 触发追加一行 timeline（kind、家族成员、原因、是否注入）并写 `state.stallEvents[]`：事件里的 `clusters` 是家族 key，`members` 是该次命中所有家族的完整 finding ID 列表（timeline 摘要同时展开 key 与成员），为命中率/收敛率统计与「删除决策」留数据。旧实例没有 `findings.jsonl` 时视为空历史：不触发、不报错。
+  - **测试**：新增 `tests/stall-detection.test.mjs`（fixture 回放与 labels 对齐、链接信号单测、父项闭合不复活、同轮关闭父项无半权、requirement 内标识符不参与 identSim、首次变热家族的 L3 候选、spec_blocked 不触发、已闭合成员判定链、hard 两轮窗口边界、零注入逐字节一致、配置关闭零触发、`repeat_of` 固化、三个引擎端到端注入/升级/不误升级用例）；既有 53 个测试保持全绿，共 70 个。
+  - `prompts/developer.md` 与 `prompts/reviewer.md` 本批零改动：补偿文本只在检测命中时出现在任务包里，不是常驻教义。
+
 ## 0.11.0 — 2026-09-16
 
 - **子 agent 瞬时故障自动重试**（真实事故：b2a 工作流 review r2，reviewer 已跑 30 个请求/21 分钟，上游网关在最后一条消息上 `stream_read_error` 断流；pi 在 `--mode json` 下对最终 assistant 消息 `stopReason: "error"` **仍然 exit 0**，引擎只靠“没有最终文本”兜住，随后直接 block，无重试）：

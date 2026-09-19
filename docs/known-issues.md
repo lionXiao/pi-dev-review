@@ -12,3 +12,9 @@
 - **多工作流并行**：不推荐；要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。
 - **计划改了就换实例**：实例按「计划文件 hash + label」区分；下一批次改了计划就要用 `dev_review_start` 新建。对已 passed 的旧实例执行 `run`、且计划文件已变时，引擎会报错提示改用 `start`（不再静默无操作）。
 - **旧安装包已废弃**：`pi-dev-review-workflow-2026-09-07`（Downloads 里的老包）以及更早的手抄版 `CLAUDE.md` 纪律段落，均被本仓库取代；不要再运行老包的 `install.sh`。
+- **停滞检测（stall detection）运行期注意**：
+  - `reports/findings.jsonl` 是新的运行产物（append-only，每轮 review 一条）。旧实例没有该文件时按空历史处理：soft/hard 都不触发、不报错；从中间开始新建的实例只有新轮次进入家族判断。手动删除该文件等于清空停滞历史（不回滚 openIssues，只是不再有跨轮家族感知）。
+  - `stallGate`（`defaults.json`，可被 `local.json` 覆盖）随实例冻结在 `state.config`。`enabled:false` 关闭判定层（不写 `state.stall`、不注入、不升级），但 `findings.jsonl` 仍按轮记录（数据层独立于判定层，方便后续打开或离线分析）；改阈值需要新实例（或直接改 `local.json` 后重新 `init`）。
+  - hard 触发会把实例 block 在 reason `stalled-issue-family`，决策文件里带机器生成的家族表和三个结构化选项；`resolve` 后同一家族可能再次触发（没有冷却，沿用「连续 hard 由人控制」的阻断语义）。
+  - reviewer 可用新 finding 上的 optional 字段 `repeat_of: "<family id>"` 确认同源；旧模型不输出该字段时，机械链接信号仍然兜底。
+  - 命中判据是纯函数（计数 + 字符串比对），只声明「这些 finding 与仍未闭合的东西关联紧密」，不宣布「同根因」；语义确认在 reviewer，范围决策在人。

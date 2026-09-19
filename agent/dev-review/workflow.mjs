@@ -593,6 +593,10 @@ function issueSummary(issue) {
     required_fix: issue.required_fix,
     first_round: issue.first_round,
     last_review_round: issue.last_review_round,
+    // Attempt counters: both roles see "which attempt is this", and the stall
+    // gate reads them without re-deriving per-round history.
+    partial_streak: Number.isInteger(issue.partial_streak) ? issue.partial_streak : 0,
+    rounds_open: Number.isInteger(issue.rounds_open) ? issue.rounds_open : 0,
   };
 }
 
@@ -685,6 +689,10 @@ function normalizeReviewerReport(value, round, existingIssues) {
     }
     if (newIds.has(id) || existingIds.has(id)) throw new Error(`Duplicate finding id ${id}`);
     newIds.add(id);
+    // Optional lineage declaration: the reviewer confirms that this finding
+    // repeats a previously reported family. Optional on purpose — the engine's
+    // mechanical signal is the fallback, so older reviewers keep working.
+    const repeatOf = asOptionalString(finding.repeat_of, `reviewer.new_findings[${index}].repeat_of`);
     return {
       id,
       severity: enumValue(finding.severity, `reviewer.new_findings[${index}].severity`, ["critical", "major", "minor"]),
@@ -692,6 +700,7 @@ function normalizeReviewerReport(value, round, existingIssues) {
       requirement: asString(finding.requirement, `reviewer.new_findings[${index}].requirement`),
       evidence: asString(finding.evidence, `reviewer.new_findings[${index}].evidence`),
       required_fix: asString(finding.required_fix, `reviewer.new_findings[${index}].required_fix`),
+      ...(repeatOf ? { repeat_of: repeatOf } : {}),
     };
   });
 
@@ -737,6 +746,10 @@ function applyReviewReport(state, review, round) {
     issue.last_review_round = round;
     issue.last_verdict = verdict.verdict;
     issue.last_evidence = verdict.evidence;
+    // Consecutive non-closed verdicts: the stall gate's earliest signal
+    // (softStreak 2 = "this issue survived two reviews without closing").
+    issue.partial_streak = (Number.isInteger(issue.partial_streak) ? issue.partial_streak : 0) + 1;
+    issue.rounds_open = round - issue.first_round;
     if (verdict.required_fix) issue.required_fix = verdict.required_fix;
   }
   for (const finding of review.new_findings) {
@@ -746,6 +759,8 @@ function applyReviewReport(state, review, round) {
       last_review_round: round,
       last_verdict: "new",
       last_evidence: finding.evidence,
+      partial_streak: 0,
+      rounds_open: 0,
     });
   }
   return [...next.values()].sort((left, right) => left.id.localeCompare(right.id));
@@ -946,7 +961,7 @@ ${recent.developerPath ? `- **Latest development handoff:** ${markdownCode(recen
 ## Why the automated loop stopped
 
 ${details.summary || "The coordinator stopped the workflow for a human decision."}
-${details.rawReport ? `\n## Developer report (recovered)\n\n${rawReportMarkdown(details.rawReport)}\n` : ""}${details.rawTextPath ? `\n## Raw agent output (verbatim)\n\nThe agent's final message was saved unchanged at ${markdownCode(details.rawTextPath)}.\n` : ""}
+${details.rawReport ? `\n## Developer report (recovered)\n\n${rawReportMarkdown(details.rawReport)}\n` : ""}${details.rawTextPath ? `\n## Raw agent output (verbatim)\n\nThe agent's final message was saved unchanged at ${markdownCode(details.rawTextPath)}.\n` : ""}${details.familyReport ? `\n## 停滞家族报告（引擎生成）\n\n${details.familyReport}\n` : ""}
 
 ## Open issues
 
@@ -1005,7 +1020,7 @@ function makeDeveloperTask(state, paths, round, previousReviewPath, humanDecisio
     required_test_commands: state.config.testCommands,
   };
 
-  return `You are the DEVELOPMENT role for round ${round}.
+  const task = `You are the DEVELOPMENT role for round ${round}.
 
 Work on the actual repository at ${state.projectRoot}. The frozen plan is ${planPath}. Read it directly. ${previousReviewPath ? `The only peer handoff you may use is ${previousReviewPath}.` : "There is no prior reviewer handoff; implement the frozen plan."} ${humanDecisionPath ? `A human decision that amends/clarifies the plan is at ${humanDecisionPath}.` : ""}
 
@@ -1030,6 +1045,11 @@ Required behavior:
   "handoff_to_reviewer": "specific review focus",
   "blockers": [{"question":"...","why":"...","options":["..."]}]
 }`;
+  // Conditional compensation, never standing doctrine: the frozen role prompt
+  // files are untouched, and a non-firing round yields byte-identical output.
+  const stall = stallSignalForRound(state, round);
+  const directive = stall?.soft?.fired ? renderStallDirective(stall.families) : "";
+  return directive ? `${task}\n\n${directive}` : task;
 }
 
 function makeReviewerTask(state, paths, round, developerPath) {
@@ -1043,7 +1063,7 @@ function makeReviewerTask(state, paths, round, developerPath) {
   };
   const priorIds = state.openIssues.map((issue) => issue.id);
 
-  return `You are the independent REVIEW role for round ${round}.
+  const task = `You are the independent REVIEW role for round ${round}.
 
 Review the actual repository at ${state.projectRoot}. The frozen plan is ${state.plan.snapshotPath}; the development handoff is ${developerPath}. Independently inspect the code and git diff from base commit ${state.base.head}. The handoff is only a checklist—verify claims yourself.
 
@@ -1066,6 +1086,11 @@ Required behavior:
   "spec_questions": [{"question":"...","why":"...","options":["..."]}],
   "handoff_to_developer": "precise next action or pass rationale"
 }`;
+  // Reviewer-side soft signal: unconnected findings that need a confirm/separate
+  // decision (repeat_of) before the engine may count them as one family.
+  const stall = stallSignalForRound(state, round);
+  const candidates = stall?.candidates?.length ? renderStallCandidateSection(stall.candidates) : "";
+  return candidates ? `${task}\n\n${candidates}` : task;
 }
 
 async function loadRolePrompt(filePath) {
@@ -1464,6 +1489,716 @@ function truncateText(value, max) {
   return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
+// ---- Stall detection (mechanical routing only) ---------------------------
+// Motivating incidents (frozen fixtures under tests/fixtures/stall): b2a (19
+// rounds, 7 manual max-rounds extensions), b2c (8 rounds, the human stopped the
+// run with a "whack-a-mole" note) and a3e2 (11 rounds). All three share one
+// failure mode: the reviewer names the next reachable path, the developer fixes
+// exactly that path, and the engine has no idea the same root-cause family
+// survived another round.
+//
+// This layer is deliberately mechanical — counting plus string comparison, no
+// LLM, no network, no filesystem access. It only claims "these findings are
+// tightly linked to something that is still open"; it never declares "same
+// root cause". Semantic confirmation stays with the reviewer (`repeat_of`) and
+// scope decisions stay with the human. The compensation texts (STALL_DIRECTIVE /
+// STALL_CANDIDATES) are data: deleting them changes nothing about routing,
+// escalation or observation.
+//
+// Threshold calibration (tests/fixtures/stall/labels.json is the contract; this
+// table is the result of replaying all 17 labelled runs):
+//   linkThreshold 1.75 · reqSim 0.35 · identSim 0.08
+//   softStreak 2 · softSpan 3 · hardStreak 3 · hardSpan 4
+// A new finding only links to a parent that was still open when the round
+// started, and a parent that survived the round's verdicts contributes half a
+// point (parentOpen); a parent verified_closed in this same round keeps zero
+// half-weight and can only link through its own text/file signals.
+//
+// identSim consumes evidence+required_fix only (plan §4.2) and linkThreshold
+// holds at 1.75 after that corrected, narrower identifier set: the label-set
+// required configuration space is identSim ≤ 0.10 with linkThreshold in
+// [1.6, 2.0]. Below/above that space either the b2a family stops clustering
+// (R17-001's tie is sameFile + its 0.125 evidence-identifier overlap with
+// R15-001) or a known L2 miss joins the primary family instead of surfacing in
+// L3. Values 0.08/1.75 leave margin on both edges: the critical pair sits at
+// exactly 0.10, and 1.75 is above every "one weak signal + parentOpen" pair
+// (1.5) while still linking two weak signals or one strong signal (≥2.0).
+// One strong signal therefore links (cross reference, or same file plus a
+// requirement/identifier overlap), while a parent closed in an earlier round is
+// never resurrected into the family.
+
+const STALL_HAN_RUN = /[\u3400-\u4dbf\u4e00-\u9fff]+/g;
+const STALL_IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]{4,}/g;
+const STALL_LOCATION_LINE = /:\d+(?:[-–—]\d+)?(?:,\d+(?:[-–—]\d+)?)*/;
+
+export const DEFAULT_STALL_GATE = Object.freeze({
+  enabled: true,
+  linkThreshold: 1.75,
+  reqSim: 0.35,
+  identSim: 0.08,
+  softStreak: 2,
+  softSpan: 3,
+  hardStreak: 3,
+  hardSpan: 4,
+});
+
+/**
+ * Accept either the frozen per-instance `state.config.stallGate` object or a
+ * bare gate object, and fill missing/invalid values from the defaults. Old
+ * instances without the field keep working (the gate defaults to enabled);
+ * malformed numbers are ignored rather than crashing a review round.
+ */
+function normalizeStallGate(value) {
+  const nested = value && typeof value === "object" && !Array.isArray(value)
+    ? value.stallGate
+    : undefined;
+  const source = nested && typeof nested === "object" && !Array.isArray(nested) ? nested : value;
+  const gate = { ...DEFAULT_STALL_GATE };
+  if (!source || typeof source !== "object" || Array.isArray(source)) return gate;
+  if (source.enabled === false) gate.enabled = false;
+  for (const key of ["linkThreshold", "reqSim", "identSim"]) {
+    const parsed = Number(source[key]);
+    if (Number.isFinite(parsed) && parsed >= 0) gate[key] = parsed;
+  }
+  for (const key of ["softStreak", "softSpan", "hardStreak", "hardSpan"]) {
+    const parsed = Number(source[key]);
+    if (Number.isInteger(parsed) && parsed >= 1) gate[key] = parsed;
+  }
+  return gate;
+}
+
+/** File part(s) of a `path:line` location; multi-location findings keep them all. */
+function stallLocationFiles(location) {
+  const files = new Set();
+  for (const part of String(location ?? "").split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const file = trimmed.replace(STALL_LOCATION_LINE, "").trim();
+    if (file) files.add(file);
+  }
+  return files;
+}
+
+/** Remove plan-reference boilerplate (F8 / Q3 / R1-003 / §1.1 / human-decision-r15…). */
+function stripStallPlanNoise(text) {
+  return String(text ?? "")
+    .replace(/human-decision-r\d+/gi, " ")
+    .replace(/§\s*[\d.]+[A-Za-z]?/g, " ")
+    .replace(/\b[A-Za-z]{1,4}-?\d+(?:[-.]\d+)*\b/g, " ")
+    .replace(/[「」“”"']/g, " ");
+}
+
+/** Chinese character bigrams over Han runs, so punctuation/Latin gaps never create bigrams. */
+function stallRequirementBigrams(requirement) {
+  const grams = new Set();
+  for (const run of stripStallPlanNoise(requirement).match(STALL_HAN_RUN) || []) {
+    for (let index = 0; index + 1 < run.length; index += 1) grams.add(run.slice(index, index + 2));
+  }
+  return grams;
+}
+
+/** ASCII identifiers of length >= 5 (function names, types, fields). */
+function stallIdentifiers(text) {
+  return new Set(String(text ?? "").match(STALL_IDENTIFIER) || []);
+}
+
+function stallJaccard(left, right) {
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  for (const value of left) if (right.has(value)) intersection += 1;
+  return intersection / (left.size + right.size - intersection);
+}
+
+function stallFindingText(finding) {
+  return [finding?.requirement, finding?.evidence, finding?.required_fix].filter(Boolean).join("\n");
+}
+
+/** Plan §4.2: the identifier signal reads evidence+required_fix only. */
+function stallEvidenceText(finding) {
+  return [finding?.evidence, finding?.required_fix].filter(Boolean).join("\n");
+}
+
+/**
+ * Link signals for one ordered pair (child = newer finding, parent = older one):
+ * sameFile, ref (child text names the parent issue id), reqSim (requirement
+ * bigram Jaccard) and identSim (identifier Jaccard over evidence+required_fix,
+ * plan §4.2). parentOpen is applied by the caller because it depends on the
+ * round being replayed.
+ */
+export function stallLinkSignals(child, parent) {
+  const parentFiles = stallLocationFiles(parent?.location);
+  const sameFile = [...stallLocationFiles(child?.location)].some((file) => parentFiles.has(file)) ? 1 : 0;
+  const parentId = String(parent?.id || "");
+  const ref = parentId && stallFindingText(child).includes(parentId) ? 1 : 0;
+  const reqSim = stallJaccard(stallRequirementBigrams(child?.requirement), stallRequirementBigrams(parent?.requirement));
+  // Requirement identifiers are represented by reqSim, never by identSim.
+  const identSim = stallJaccard(stallIdentifiers(stallEvidenceText(child)), stallIdentifiers(stallEvidenceText(parent)));
+  return { sameFile, ref, reqSim, identSim };
+}
+
+/** score = sameFile + 2·ref + [reqSim] + [identSim] + 0.5·parentOpen. */
+export function stallLinkScore(signals, parentOpen, gate = DEFAULT_STALL_GATE) {
+  const config = normalizeStallGate(gate);
+  return (signals?.sameFile ? 1 : 0)
+    + (signals?.ref ? 2 : 0)
+    + (Number(signals?.reqSim) >= config.reqSim ? 1 : 0)
+    + (Number(signals?.identSim) >= config.identSim ? 1 : 0)
+    + (parentOpen ? 0.5 : 0);
+}
+
+/** Natural ordering: R9-001 before R10-001, so cluster keys stay stable and readable. */
+function compareStallIssueIds(left, right) {
+  const parse = (id) => {
+    const match = /^R(\d+)-(\d+)$/.exec(String(id));
+    return match ? [Number(match[1]), Number(match[2])] : null;
+  };
+  const a = parse(left);
+  const b = parse(right);
+  if (a && b) return a[0] - b[0] || a[1] - b[1];
+  return String(left).localeCompare(String(right));
+}
+
+function createStallUnionFind() {
+  const parents = new Map();
+  const find = (id) => {
+    if (!parents.has(id)) return undefined;
+    let root = id;
+    while (parents.get(root) !== root) root = parents.get(root);
+    let cursor = id;
+    while (parents.get(cursor) !== root) {
+      const next = parents.get(cursor);
+      parents.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  };
+  return {
+    add(id) {
+      if (!parents.has(id)) parents.set(id, id);
+    },
+    find,
+    union(left, right) {
+      if (find(left) === undefined) this.add(left);
+      if (find(right) === undefined) this.add(right);
+      const rootLeft = find(left);
+      const rootRight = find(right);
+      if (rootLeft !== rootRight) parents.set(rootLeft, rootRight);
+    },
+  };
+}
+
+/**
+ * Union-find members grouped into families. `span` is the family age at the
+ * evaluated round (first member round → current round), which is what "this
+ * family survived N rounds" means; member rounds stay available separately.
+ */
+function collectStallClusters(unionFind, issues, evaluatedRound = null) {
+  const groups = new Map();
+  for (const issue of issues.values()) {
+    if (issue.specBlocked) continue;
+    const root = unionFind.find(issue.id);
+    if (root === undefined) continue;
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(issue);
+  }
+  const clusters = [];
+  for (const members of groups.values()) {
+    const sorted = members.slice().sort((left, right) => compareStallIssueIds(left.id, right.id));
+    const rounds = [...new Set(sorted.map((member) => member.first_round))].sort((left, right) => left - right);
+    const openMembers = sorted.filter((member) => member.open).map((member) => member.id);
+    const files = [...new Set(sorted.flatMap((member) => [...stallLocationFiles(member.finding.location)]))].sort();
+    clusters.push({
+      key: sorted[0].id,
+      members: sorted.map((member) => member.id),
+      memberDetails: sorted.map((member) => ({
+        id: member.id,
+        severity: member.finding.severity,
+        first_round: member.first_round,
+        last_round: member.last_review_round,
+        last_verdict: member.last_verdict,
+        open: member.open,
+        chain: member.verdictHistory.map((entry) => `r${entry.round}:${entry.verdict}`).join(" → "),
+      })),
+      rounds,
+      span: (evaluatedRound ?? rounds[rounds.length - 1]) - rounds[0],
+      openMembers,
+      files,
+      hot: sorted.length >= 2 && openMembers.length > 0,
+    });
+  }
+  return clusters.sort((left, right) => compareStallIssueIds(left.key, right.key));
+}
+
+function normalizeStallLog(log) {
+  const source = Array.isArray(log) ? log : Array.isArray(log?.rounds) ? log.rounds : [];
+  // Append-only logs can contain the same round twice when an interrupted
+  // review invocation resumes; the last record wins so verdicts are never
+  // double-counted during replay.
+  const byRound = new Map();
+  for (const record of source) {
+    if (!record || typeof record !== "object" || !Number.isInteger(Number(record.round))) continue;
+    const round = Number(record.round);
+    byRound.set(round, { ...record, round });
+  }
+  return [...byRound.values()].sort((left, right) => left.round - right.round);
+}
+
+/**
+ * Live `state.openIssues` is authoritative for the final round when supplied:
+ * it marks which replayed issues are still open and copies the engine's own
+ * `partial_streak`/`rounds_open` bookkeeping. Fixture replay (no live state)
+ * derives the same values from the log alone.
+ */
+function applyStallLiveOpenIssues(issues, openIssues) {
+  if (!Array.isArray(openIssues) || openIssues.length === 0) return;
+  const live = new Map(openIssues.filter((issue) => issue && typeof issue.id === "string").map((issue) => [issue.id, issue]));
+  for (const issue of issues.values()) {
+    const state = live.get(issue.id);
+    if (!state) {
+      issue.open = false;
+      continue;
+    }
+    issue.open = true;
+    const streak = Number(state.partial_streak);
+    if (Number.isInteger(streak) && streak >= 0) issue.partial_streak = streak;
+    const roundsOpen = Number(state.rounds_open);
+    if (Number.isInteger(roundsOpen) && roundsOpen >= 0) issue.rounds_open = roundsOpen;
+  }
+}
+
+function stallTriggers(clusters, issues, gate, round) {
+  const softReasons = [];
+  const hardReasons = [];
+  const softKeys = new Set();
+  const hardKeys = new Set();
+  const clusterKeyByMember = new Map();
+  for (const cluster of clusters) for (const id of cluster.members) clusterKeyByMember.set(id, cluster.key);
+
+  for (const issue of issues.values()) {
+    if (!issue.open) continue;
+    // Findings born in a spec_blocked round carry no code signal (plan §4.2):
+    // they are excluded from linking and must not drive streak triggers either,
+    // otherwise a hard fire can surface a family report with no cluster at all.
+    if (issue.specBlocked) continue;
+    const key = clusterKeyByMember.get(issue.id);
+    if (issue.partial_streak >= gate.softStreak) {
+      softReasons.push(`issue-streak:${issue.id}:${issue.partial_streak}`);
+      if (key) softKeys.add(key);
+    }
+    if (issue.partial_streak >= gate.hardStreak) {
+      hardReasons.push(`issue-streak:${issue.id}:${issue.partial_streak}`);
+      if (key) hardKeys.add(key);
+    }
+  }
+  for (const cluster of clusters) {
+    if (cluster.members.length < 2 || cluster.openMembers.length === 0) continue;
+    if (cluster.span >= gate.softSpan) {
+      softReasons.push(`family-span:${cluster.key}:${cluster.span}`);
+      softKeys.add(cluster.key);
+    }
+    // "new members in the most recent two rounds" is a window, not a
+    // conjunction: a member born in r-1 or r keeps the family churning, even
+    // when the current round itself added no new finding.
+    if (
+      cluster.span >= gate.hardSpan
+      && cluster.openMembers.length >= 2
+      && cluster.rounds.some((memberRound) => memberRound === round || memberRound === round - 1)
+    ) {
+      hardReasons.push(`family-span:${cluster.key}:${cluster.span}`);
+      hardKeys.add(cluster.key);
+    }
+  }
+  return {
+    soft: { fired: softReasons.length > 0, reasons: softReasons, clusters: [...softKeys] },
+    hard: { fired: hardReasons.length > 0, reasons: hardReasons, clusters: [...hardKeys] },
+  };
+}
+
+/**
+ * L3 candidates: findings of the evaluated round that are not connected to the
+ * hot family (plus open unconnected findings in the family's files). This is
+ * how paraphrased siblings the text linker legitimately misses reach the
+ * reviewer for a confirm/separate decision instead of being silently claimed
+ * as a link.
+ *
+ * Hot families are read from the FINAL clusters of the evaluated round: a
+ * family that just formed this round (new link to a previous finding) must
+ * surface the round's other unconnected findings, not only families that were
+ * already hot before the round. "Alive during the review" is therefore
+ * `open at the end` OR `open when the round started` — the latter keeps an
+ * established family visible on the round where its members receive their
+ * closing verdicts. Only the primary (largest) hot family is targeted.
+ */
+function stallCandidates(round, issues, unionFind, clusters, openAtStart) {
+  const hotFamilies = clusters.filter(
+    (cluster) => cluster.members.length >= 2
+      && (cluster.openMembers.length > 0 || cluster.members.some((id) => openAtStart.has(id))),
+  );
+  if (!hotFamilies.length) return [];
+  const primary = hotFamilies
+    .slice()
+    .sort((left, right) => right.members.length - left.members.length || compareStallIssueIds(left.key, right.key))[0];
+  const primaryRoot = unionFind.find(primary.key);
+  const hotFiles = new Set(primary.files);
+  const candidates = [];
+  for (const issue of issues.values()) {
+    if (issue.specBlocked || !issue.open) continue;
+    if (unionFind.find(issue.id) === primaryRoot) continue;
+    const sameRound = issue.first_round === round;
+    const sameArea = [...stallLocationFiles(issue.finding.location)].some((file) => hotFiles.has(file));
+    if (!sameRound && !sameArea) continue;
+    candidates.push({
+      id: issue.id,
+      family: primary.key,
+      severity: issue.finding.severity,
+      location: issue.finding.location,
+      requirement: issue.finding.requirement,
+      first_round: issue.first_round,
+      last_round: issue.last_review_round,
+      last_verdict: issue.last_verdict,
+    });
+  }
+  return candidates.sort((left, right) => compareStallIssueIds(left.id, right.id));
+}
+
+/**
+ * Replay the review log once, round by round, and evaluate the stall gate after
+ * every `fix_required` round. Findings from `spec_blocked` rounds carry no code
+ * signal and are excluded from linking/candidacy; verdicts are still applied so
+ * streak bookkeeping stays faithful.
+ */
+function stallReplay(rounds, gate, openIssues) {
+  const issues = new Map();
+  const unionFind = createStallUnionFind();
+  const lastIndex = rounds.length - 1;
+  let evaluation = null;
+
+  for (let index = 0; index <= lastIndex; index += 1) {
+    const record = rounds[index];
+    const round = record.round;
+    const decision = typeof record.decision === "string" ? record.decision : null;
+    const verdicts = Array.isArray(record.verdicts) ? record.verdicts : [];
+    const findings = Array.isArray(record.findings) ? record.findings : [];
+    const openAtStart = new Set([...issues.values()].filter((issue) => issue.open).map((issue) => issue.id));
+
+    for (const verdict of verdicts) {
+      const issue = issues.get(verdict?.id);
+      if (!issue) continue;
+      issue.last_review_round = round;
+      issue.rounds_open = round - issue.first_round;
+      if (verdict.verdict === "verified_closed") {
+        issue.open = false;
+        issue.partial_streak = 0;
+        issue.last_verdict = "verified_closed";
+      } else {
+        issue.open = true;
+        issue.partial_streak += 1;
+        issue.last_verdict = typeof verdict.verdict === "string" ? verdict.verdict : "still_open";
+      }
+      issue.verdictHistory.push({ round, verdict: issue.last_verdict });
+    }
+
+    const specBlocked = decision === "spec_blocked";
+    for (const finding of findings) {
+      if (!finding || typeof finding.id !== "string" || !finding.id) continue;
+      issues.set(finding.id, {
+        id: finding.id,
+        finding,
+        first_round: round,
+        open: true,
+        partial_streak: 0,
+        rounds_open: 0,
+        last_verdict: "new",
+        last_review_round: round,
+        verdictHistory: [],
+        specBlocked,
+      });
+      if (!specBlocked) unionFind.add(finding.id);
+    }
+
+    if (index === lastIndex) applyStallLiveOpenIssues(issues, openIssues);
+
+    if (!specBlocked) {
+      // Reviewer-declared lineage first: `repeat_of` puts the new finding into
+      // the named family even when no text/identifier signal fires.
+      for (const finding of findings) {
+        const repeatOf = typeof finding?.repeat_of === "string" ? finding.repeat_of.trim() : "";
+        if (repeatOf && unionFind.find(repeatOf) !== undefined) unionFind.union(finding.id, repeatOf);
+      }
+      for (const finding of findings) {
+        const child = issues.get(finding.id);
+        if (!child) continue;
+        for (const parent of issues.values()) {
+          if (parent.id === child.id || parent.first_round >= round || parent.specBlocked) continue;
+          if (!openAtStart.has(parent.id)) continue;
+          const signals = stallLinkSignals(child.finding, parent.finding);
+          // parentOpen is half weight only while the parent survived this
+          // round's verdicts; a parent verified_closed in this same round keeps
+          // zero and can only link through its own text/file signals.
+          const parentOpen = parent.open ? 1 : 0;
+          if (stallLinkScore(signals, parentOpen, gate) >= gate.linkThreshold) unionFind.union(child.id, parent.id);
+        }
+      }
+    }
+
+    if (decision === "fix_required") {
+      const clusters = collectStallClusters(unionFind, issues, round);
+      const triggers = stallTriggers(clusters, issues, gate, round);
+      evaluation = {
+        round,
+        clusters,
+        soft: triggers.soft,
+        hard: triggers.hard,
+        candidates: stallCandidates(round, issues, unionFind, clusters, openAtStart),
+      };
+    }
+  }
+  return evaluation;
+}
+
+/**
+ * Pure stall detector. `log` is either the findings.jsonl array (one record per
+ * review round: {round, decision, verdicts, findings}) or a whole fixture object
+ * with a `rounds` array, so frozen fixtures replay without transformation.
+ * `openIssues` is optional live state (see applyStallLiveOpenIssues); `config`
+ * is `state.config` or a bare stallGate object.
+ *
+ * Returns { round, clusters, soft, hard, candidates } — `clusters` is empty and
+ * nothing fires when the gate is disabled, the log is empty (old instances) or
+ * the latest round was not `fix_required`.
+ */
+export function detectStallClusters(log, openIssues, config) {
+  const gate = normalizeStallGate(config);
+  const empty = {
+    round: null,
+    clusters: [],
+    soft: { fired: false, reasons: [], clusters: [] },
+    hard: { fired: false, reasons: [], clusters: [] },
+    candidates: [],
+  };
+  if (!gate.enabled) return empty;
+  const rounds = normalizeStallLog(log);
+  if (!rounds.length) return empty;
+  // Only a fix_required review can trigger evaluation. Anything else (pass,
+  // spec_blocked) leaves the previously persisted signal untouched instead of
+  // re-reporting a stale round as if it just fired.
+  if (rounds[rounds.length - 1].decision !== "fix_required") return empty;
+  return stallReplay(rounds, gate, openIssues) ?? empty;
+}
+
+/** Compact, serializable projection persisted as `state.stall` for task injection. */
+function stallStateFromDetection(detection) {
+  if (!detection || detection.round === null) return null;
+  const keys = new Set([...detection.soft.clusters, ...detection.hard.clusters]);
+  return {
+    round: detection.round,
+    at: now(),
+    soft: detection.soft,
+    hard: detection.hard,
+    candidates: detection.candidates,
+    families: detection.clusters.filter((cluster) => keys.has(cluster.key)),
+  };
+}
+
+/** The stall signal only applies to rounds that come after the review that produced it. */
+function stallSignalForRound(state, round) {
+  if (!normalizeStallGate(state?.config?.stallGate).enabled) return null;
+  const stall = state?.stall;
+  if (!stall || !Number.isInteger(stall.round) || stall.round >= round) return null;
+  return stall;
+}
+
+function stallFamilyMemberLine(member) {
+  const status = member.open ? "未闭合" : "已闭合";
+  return `- ${member.id}（${member.severity}；首现 r${member.first_round}；最近判定 r${member.last_round}: ${member.last_verdict}；${status}）`;
+}
+
+/**
+ * Family-level acceptance criteria for the next developer round. The text is a
+ * separate constant so removing it can never affect routing/observation.
+ */
+export const STALL_DIRECTIVE = `## 停滞家族补偿判据（引擎注入）
+
+{families}
+
+本轮按家族整体验收：给出根因不变量，逐一列出会违反它的边界，并对每条给出“已修 / 不可达 / 不在本批”的结论与证据；实现方式不限，但只修被点名的那条路径、其余沉默视为未完成。`;
+
+/** Fill STALL_DIRECTIVE for the soft-fired families (primary cluster listed first). */
+export function renderStallDirective(families) {
+  if (typeof STALL_DIRECTIVE !== "string" || !STALL_DIRECTIVE) return "";
+  const blocks = (families || [])
+    .slice()
+    .sort((left, right) => right.members.length - left.members.length || compareStallIssueIds(left.key, right.key))
+    .map((family) => [
+      `该文件族（family ${family.key}）在最近 ${family.span} 轮评审中产生 ${family.members.length} 条同源 finding，仍有 ${family.openMembers.length} 条未闭合：`,
+      ...family.memberDetails.map(stallFamilyMemberLine),
+    ].join("\n"))
+    .join("\n\n");
+  return STALL_DIRECTIVE.replace("{families}", blocks);
+}
+
+/**
+ * Reviewer-side candidate confirmation. Uses review-round data only: the
+ * reviewer formally declares `repeat_of` when confirming a candidate.
+ */
+export const STALL_CANDIDATES = `## 未连接候选确认（引擎注入）
+
+以下 finding 与本家族未连接。请逐条确认或分离：确认为同源时，在你本轮的新 finding 上用 optional 字段 repeat_of: "{family}" 声明；确认不同源时，在 handoff_to_developer 中说明判断依据。
+
+{candidates}`;
+
+export function renderStallCandidateSection(candidates) {
+  if (typeof STALL_CANDIDATES !== "string" || !STALL_CANDIDATES) return "";
+  const family = candidates[0]?.family || "";
+  const lines = candidates.map((candidate) => {
+    const verdict = candidate.last_verdict === "new" ? "本轮新增" : `最近判定 r${candidate.last_round}: ${candidate.last_verdict}`;
+    return `- ${candidate.id}（${candidate.severity}，${candidate.location}；首现 r${candidate.first_round}，${verdict}）— ${candidate.requirement}`;
+  });
+  return STALL_CANDIDATES.replace("{family}", family).replace("{candidates}", lines.join("\n"));
+}
+
+/** Machine-generated family table attached to the human escalation. */
+function stallFamilyReport(cluster) {
+  const members = cluster.memberDetails.map((member) => {
+    const chain = member.chain ? ` 判定链 ${member.chain}` : "（仅本轮新增）";
+    return `- ${member.id}（${member.severity}，首现 r${member.first_round}，最近 r${member.last_round}: ${member.last_verdict}）${chain}`;
+  });
+  return [
+    `### 家族 ${cluster.key}`,
+    `- 成员：${cluster.members.length} 条；跨度：${cluster.span} 轮（成员首现轮次 ${cluster.rounds.map((round) => `r${round}`).join(", ")}）；未闭合：${cluster.openMembers.length} 条${cluster.openMembers.length ? `（${cluster.openMembers.join(", ")}）` : ""}`,
+    `- 热态文件：${cluster.files.length ? cluster.files.join(", ") : "(无)"}`,
+    "",
+    ...members,
+  ].join("\n");
+}
+
+function stallHardQuestions(clusters) {
+  return clusters.map((cluster) => ({
+    question: `停滞家族 ${cluster.key}（${cluster.members.length} 条 finding，${cluster.openMembers.length} 条未闭合，跨度 ${cluster.span} 轮）如何处理？`,
+    why: "同一根因家族的 finding 已跨多轮存活，机械信号判定需要人类决定继续收敛、登记为已知限制还是修订口径。",
+    options: [
+      "授权一轮钉死范围的系统性修复（请写出范围）",
+      "该家族登记为已知限制并顺延到后续批次",
+      "修订计划/口径（附当前家族报告）",
+    ],
+  }));
+}
+
+function stallHardSummary(detection, clusters) {
+  const parts = clusters.map((cluster) => `${cluster.key}（${cluster.members.length} 条，未闭合 ${cluster.openMembers.length}，跨度 ${cluster.span} 轮）`);
+  return `停滞家族触发硬升级：${parts.join("；")}。触发原因：${detection.hard.reasons.join("；")}`;
+}
+
+function findingsLogPath(paths) {
+  return path.join(paths.reports, "findings.jsonl");
+}
+
+/** Append-only review log; one JSON object per review round (fixture-isomorphic). */
+async function appendFindingsLog(paths, record) {
+  await mkdir(paths.reports, { recursive: true });
+  await appendFile(findingsLogPath(paths), `${JSON.stringify(record)}\n`, "utf8");
+}
+
+/**
+ * Read the review log, keeping the last record per round: an interrupted
+ * invocation can resume the same review round, and a duplicate line must not
+ * double-count verdicts during replay. A missing file is an empty history.
+ */
+async function readFindingsLog(paths) {
+  let text = "";
+  try {
+    text = await readFile(findingsLogPath(paths), "utf8");
+  } catch {
+    return [];
+  }
+  const byRound = new Map();
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const round = Number(record?.round);
+    if (!record || !Number.isInteger(round)) continue;
+    byRound.set(round, { ...record, round });
+  }
+  return [...byRound.values()].sort((left, right) => left.round - right.round);
+}
+
+/**
+ * Evaluate the gate after one review round and persist the result as state.stall.
+ * A non-`fix_required` round never overwrites a previous signal, so an injected
+ * family directive survives a spec_blocked interruption until the next
+ * fix_required evaluation.
+ */
+async function evaluateStallGate(state, paths, notify) {
+  try {
+    const gate = normalizeStallGate(state.config?.stallGate);
+    if (!gate.enabled) {
+      state.stall = null;
+      return null;
+    }
+    const log = await readFindingsLog(paths);
+    const detection = detectStallClusters(log, state.openIssues, gate);
+    if (detection.round === null) return null;
+    state.stall = stallStateFromDetection(detection);
+    return detection;
+  } catch (error) {
+    notify?.(`Stall detection skipped this round: ${error && error.message ? error.message : error}`);
+    return null;
+  }
+}
+
+/** Timeline + state.stallEvents entry for every soft/hard trigger (observation only). */
+async function recordStallEvents(state, paths, detection) {
+  const clusterByKey = new Map((detection.clusters || []).map((cluster) => [cluster.key, cluster]));
+  const clusterMembers = (keys) => [...new Set(keys.flatMap((key) => clusterByKey.get(key)?.members ?? []))].sort(compareStallIssueIds);
+  const clusterLabel = (key) => {
+    const members = clusterByKey.get(key)?.members ?? [];
+    return members.length ? `${key}[${members.join(", ")}]` : key;
+  };
+  const events = [];
+  if (detection.soft.fired) {
+    events.push({
+      kind: "soft",
+      injected: true,
+      reasons: detection.soft.reasons,
+      clusters: detection.soft.clusters,
+      members: clusterMembers(detection.soft.clusters),
+    });
+  }
+  if (detection.hard.fired) {
+    events.push({
+      kind: "hard",
+      injected: false,
+      reasons: detection.hard.reasons,
+      clusters: detection.hard.clusters,
+      members: clusterMembers(detection.hard.clusters),
+    });
+  }
+  if (!events.length) return;
+  state.stallEvents = Array.isArray(state.stallEvents) ? state.stallEvents : [];
+  for (const event of events) {
+    // A resumed invocation can re-evaluate the same review round; observation
+    // must not double-count it.
+    if (state.stallEvents.some((entry) => entry.round === detection.round && entry.kind === event.kind)) continue;
+    const record = {
+      at: now(),
+      round: detection.round,
+      ...event,
+    };
+    state.stallEvents.push(record);
+    await appendTimeline(paths, timelineLine({
+      round: detection.round,
+      event: `stall-${event.kind}`,
+      status: "fired",
+      summary: `${event.injected ? "注入下一轮开发者任务包" : "升级为 stalled-issue-family"} — 家族 ${event.clusters.map(clusterLabel).join(", ") || "(none)"} — 成员 ${event.members.join(", ") || "(none)"} — 原因 ${event.reasons.join("; ")}`,
+    }));
+  }
+}
+
 // ---- Token usage tracking (dev/review child agents) ----------------------
 // The child pi runs with --mode json, so every provider request produces
 // message_start (request begins) → message_update (deltas) → message_end
@@ -1790,6 +2525,9 @@ function mergeConfig(state, options, { requireModels = false, defaults = {} } = 
     testCommands: options.tests.length ? options.tests : (current.testCommands ?? defaults.testCommands ?? []),
     developerThinking: options.developerThinking ?? current.developerThinking ?? defaults.developerThinking ?? null,
     reviewerThinking: options.reviewerThinking ?? current.reviewerThinking ?? defaults.reviewerThinking ?? null,
+    // Frozen per instance like the rest of the config; local.json can override
+    // via `stallGate`, and old instances without the field fall back to defaults.
+    stallGate: normalizeStallGate(options.stallGate ?? current.stallGate ?? defaults.stallGate),
   };
 }
 
@@ -2251,6 +2989,39 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     history.reviewerPath = relativeTo(projectRoot, reviewerMarkdownPath);
     history.decision = review.decision;
 
+    // Review log (findings.jsonl): appended for every decision so replay stays
+    // complete; the stall gate only evaluates fix_required rounds.
+    await appendFindingsLog(paths, {
+      round,
+      decision: review.decision,
+      verdicts: review.previous_issue_verdicts.map((verdict) => ({ id: verdict.id, verdict: verdict.verdict })),
+      findings: review.new_findings.map((finding) => ({
+        id: finding.id,
+        severity: finding.severity,
+        location: finding.location,
+        requirement: finding.requirement,
+        evidence: finding.evidence,
+        required_fix: finding.required_fix,
+        ...(finding.repeat_of ? { repeat_of: finding.repeat_of } : {}),
+      })),
+    });
+    const stallDetection = await evaluateStallGate(state, paths, notify);
+    if (stallDetection) {
+      await recordStallEvents(state, paths, stallDetection);
+      // Hard signal: stop the loop for a human decision before the next round.
+      // The three structured options live in the escalation file and in the
+      // blockedNotice surfaced by the CLI/extension.
+      if (stallDetection.hard.fired) {
+        const hardClusters = stallDetection.clusters.filter((cluster) => stallDetection.hard.clusters.includes(cluster.key));
+        await escalate("stalled-issue-family", {
+          summary: stallHardSummary(stallDetection, hardClusters),
+          familyReport: hardClusters.map(stallFamilyReport).join("\n\n"),
+          questions: stallHardQuestions(hardClusters),
+        });
+        return { state, paths, message: `Stall family requires a human decision.\n${blockedNotice(state)}` };
+      }
+    }
+
     if (review.decision === "spec_blocked") {
       await escalate("reviewer-spec-blocked", {
         summary: review.summary,
@@ -2531,13 +3302,19 @@ export {
   adoptWorkflow,
   localNow,
   localTimezoneLabel,
+  makeDeveloperTask,
+  makeReviewerTask,
   normalizeDevSkills,
   normalizeDeveloperReport,
   normalizeReviewerReport,
+  normalizeStallGate,
   planChangedSinceFrozen,
   resolvePlanSource,
   runWorkflow,
   splitArguments,
+  stallIdentifiers,
+  stallLocationFiles,
+  stallRequirementBigrams,
   timelineFilePath,
   timelineLine,
   usageEntry,

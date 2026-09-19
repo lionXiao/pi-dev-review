@@ -6,5 +6,15 @@
   "devSkills": [],
   "testCommands": [],
   "developerThinking": null,
-  "reviewerThinking": null
+  "reviewerThinking": null,
+  "stallGate": {
+    "enabled": true,
+    "linkThreshold": 1.75,
+    "reqSim": 0.35,
+    "identSim": 0.08,
+    "softStreak": 2,
+    "softSpan": 3,
+    "hardStreak": 3,
+    "hardSpan": 4
+  }
 }
