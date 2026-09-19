@@ -10,7 +10,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, writeFile, appendFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +21,12 @@ const SCHEMA_VERSION = 1;
 const DEFAULT_ARTIFACT_DIR = ".ai-dev-review";
 const DEFAULT_MAX_ROUNDS = 10;
 const DEFAULT_DEVELOPER_RESET_AFTER_ROUNDS = 4;
+const DEFAULT_AGENT_RETRIES = 2;
+// Developer-only skills injected with pi's repeatable `--skill <path>` flag.
+// Roles run with `--no-skills`, so this is an explicit channel (caller decides),
+// never local skill discovery.
+const DEFAULT_DEV_SKILLS = [];
+const AGENT_RETRY_BASE_DELAY_MS = 5000;
 const DEV_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 const REVIEW_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const ROLE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "prompts");
@@ -42,14 +48,20 @@ const HELP = `
 /dev-review configure [--developer-model <provider/model>] [--reviewer-model <provider/model>] [--max-rounds <n>]
 
 Options for init/configure:
-  --workflow <label>                Human-readable workflow label; default derives from the PRD filename
+  --workflow <label>                Human-readable workflow label; REPLACES the plan-derived name (not a prefix), so include the version — e.g. v1.2-b2c-rerun
   --artifact-dir <dir>              Explicit artifact directory; otherwise uses ${DEFAULT_ARTIFACT_DIR}/<prd-name>--<plan-hash>
   --max-rounds <n>                  Developer+review cycles before human escalation (default: ${DEFAULT_MAX_ROUNDS})
   --developer-reset-after <n>       Rotate the developer's private Pi session after n rounds (default: ${DEFAULT_DEVELOPER_RESET_AFTER_ROUNDS})
+  --agent-retries <n>               Automatic retries per agent run on transient execution failures (default: ${DEFAULT_AGENT_RETRIES})
+  --dev-skill <path>                Extra Pi skill for the developer only; repeatable, file or directory
   --test <command>                  Required test command; repeatable
   --developer-thinking <level>      Pi thinking level for the developer
   --reviewer-thinking <level>       Pi thinking level for the reviewer
   --allow-dirty                     Permit initializing from an already dirty worktree
+
+Roles run with skill discovery disabled, so the developer only sees the skills
+explicitly passed via --dev-skill. The reviewer never receives skills, and the
+frozen list is recorded in the workflow state for audit.
 
 The developer and reviewer model values must be different. Models are never
 stored with credentials; Pi continues to use its normal provider auth.
@@ -196,6 +208,8 @@ function parseOptions(tokens) {
     "--workflow",
     "--max-rounds",
     "--developer-reset-after",
+    "--agent-retries",
+    "--dev-skill",
     "--test",
     "--choose",
     "--note",
@@ -218,12 +232,14 @@ function parseOptions(tokens) {
       if (!value || value.startsWith("--")) throw new Error(`${token} requires a value`);
       index += 1;
       if (token === "--test") options.tests.push(value);
+      else if (token === "--dev-skill") (options.devSkills ??= []).push(value);
       else if (token === "--developer-model") options.developerModel = value;
       else if (token === "--reviewer-model") options.reviewerModel = value;
       else if (token === "--artifact-dir") options.artifactDir = value;
       else if (token === "--workflow") options.workflow = value;
       else if (token === "--max-rounds") options.maxRounds = numberOption(value, token);
       else if (token === "--developer-reset-after") options.developerResetAfterRounds = numberOption(value, token);
+      else if (token === "--agent-retries") options.agentRetries = numberOption(value, token, 0);
       else if (token === "--developer-thinking") options.developerThinking = value;
       else if (token === "--reviewer-thinking") options.reviewerThinking = value;
       else if (token === "--choose") options.choose = value;
@@ -1151,11 +1167,40 @@ function standalonePiInvocation() {
   return { command: process.env.PI_BIN || "pi", args: [] };
 }
 
+/**
+ * Execution failures worth retrying automatically: provider stream breaks,
+ * network/timeout faults, and unclassified child crashes. Auth/permission and
+ * quota/billing exhaustion cannot be changed by retrying, and an aborted run
+ * or a failed spawn needs a human (or a fixed environment) instead.
+ */
+const NON_RETRYABLE_AGENT_FAILURE_PATTERN = /(insufficient_?quota|quota exceeded|out of budget|available balance|billing|欠费|余额|invalid api key|unauthor|authentication|not authorized|permission denied|forbidden)/i;
+
+function agentFailureRetryable({ kind = "", errorMessage = "", stderr = "" } = {}) {
+  if (kind === "aborted" || kind === "spawn") return false;
+  return !NON_RETRYABLE_AGENT_FAILURE_PATTERN.test(`${errorMessage}\n${stderr}`);
+}
+
+function agentFailureError(message, details) {
+  const error = new Error(message);
+  error.agentFailure = { ...details, retryable: agentFailureRetryable(details) };
+  return error;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Overridable for tests / debugging via DEV_REVIEW_RETRY_BASE_MS. */
+function agentRetryBaseDelayMs() {
+  const configured = Number(process.env.DEV_REVIEW_RETRY_BASE_MS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : AGENT_RETRY_BASE_DELAY_MS;
+}
+
 async function invokePiAgent({ role, state, paths, round, task, piInvocation, notify, onStats }) {
   const developer = role === "developer";
   const rolePrompt = await loadRolePrompt(developer ? DEV_ROLE_PROMPT : REVIEW_ROLE_PROMPT);
   const config = developer
-    ? { model: state.config.developerModel, thinking: state.config.developerThinking, tools: DEV_TOOLS }
+    ? { model: state.config.developerModel, thinking: state.config.developerThinking, tools: DEV_TOOLS, devSkills: state.config.devSkills ?? DEFAULT_DEV_SKILLS }
     : { model: state.config.reviewerModel, thinking: state.config.reviewerThinking, tools: REVIEW_TOOLS };
 
   const args = [
@@ -1171,6 +1216,10 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
   ];
   if (config.thinking) args.push("--thinking", config.thinking);
   if (developer) {
+    // Skills are developer-only by design: the reviewer's value is independence,
+    // and injected how-to guidance would bias its verdict. `--skill` is additive
+    // even though `--no-skills` is set, so this does not reopen discovery.
+    for (const skill of config.devSkills ?? []) args.push("--skill", skill);
     const generation = Math.floor((round - 1) / state.config.developerResetAfterRounds) + 1;
     state.developerSession = { generation, sessionId: `developer-g${generation}` };
     args.push("--session-dir", paths.developerSessions, "--session-id", state.developerSession.sessionId);
@@ -1181,9 +1230,54 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
   }
   args.push(task);
 
-  notify?.(`${developer ? "Development" : "Review"} agent: round ${round} started (${config.model}${config.thinking ? ` · thinking ${config.thinking}` : ""}).`);
+  const configuredRetries = Number(state.config.agentRetries);
+  const retries = Number.isFinite(configuredRetries) && configuredRetries >= 0
+    ? Math.floor(configuredRetries)
+    : DEFAULT_AGENT_RETRIES;
+  const maxAttempts = retries + 1;
+  // One stats object across attempts: a retried round reports the total tokens
+  // it actually burned, not just the last attempt's numbers.
   const stats = createUsageStats();
-  const output = await new Promise((resolve, reject) => {
+  const label = `${developer ? "dev" : "review"} r${round}`;
+
+  notify?.(`${developer ? "Development" : "Review"} agent: round ${round} started (${config.model}${config.thinking ? ` · thinking ${config.thinking}` : ""}).`);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const output = await spawnPiAgentOnce({ role, state, paths, round, args, piInvocation, notify, onStats, stats });
+      notify?.(`${developer ? "Development" : "Review"} agent: round ${round} finished.`);
+      return output;
+    } catch (error) {
+      const failure = error?.agentFailure
+        || { kind: "unknown", retryable: false, errorMessage: error?.message || String(error) };
+      if (!failure.retryable || attempt >= maxAttempts) {
+        // Retried runs are part of the record: callers (and escalation
+        // summaries) should see how many attempts the round burned.
+        if (attempt > 1 && error instanceof Error) error.message = `${error.message} (after ${attempt}/${maxAttempts} attempts)`;
+        throw error;
+      }
+      const delayMs = agentRetryBaseDelayMs() * 2 ** (attempt - 1);
+      const reason = truncateText(failure.errorMessage || error.message, 200);
+      notify?.(`[${label}] ⚠️ attempt ${attempt}/${maxAttempts} failed: ${reason} — retrying in ${Math.round(delayMs / 1000)}s.`);
+      await appendTimeline(paths, timelineLine({
+        round,
+        event: "agent-retry",
+        status: `${attempt}/${maxAttempts}`,
+        summary: `${developer ? "developer" : "reviewer"} attempt ${attempt} failed: ${reason} · retrying in ${Math.round(delayMs / 1000)}s`,
+      }));
+      await sleep(delayMs);
+    }
+  }
+}
+
+/**
+ * One Pi child process for one role+round. The caller owns `stats` so retried
+ * attempts aggregate into a single usage entry for the round. Retries reuse
+ * the same session id: pi drops errored/aborted assistant turns from provider
+ * input, so the retry resumes the transcript without the broken turn.
+ */
+async function spawnPiAgentOnce({ role, state, paths, round, args, piInvocation, notify, onStats, stats }) {
+  const developer = role === "developer";
+  return new Promise((resolve, reject) => {
     const child = spawn(piInvocation.command, args, {
       cwd: state.projectRoot,
       env: process.env,
@@ -1193,6 +1287,9 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
     let stdoutBuffer = "";
     let stderr = "";
     let finalText = "";
+    // Final assistant message stop state: pi's `--mode json` exits 0 even after
+    // a provider stream error, so the stop reason is the only reliable signal.
+    let lastAssistant = null;
     // Current provider request timing (one per assistant message).
     let request = null;
 
@@ -1245,6 +1342,10 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
         if (request.usage) finalizeRequest();
         else request = null; // Provider reported no usage; drop the partial timing.
         finalText = messageText(event.message);
+        lastAssistant = {
+          stopReason: typeof event.message.stopReason === "string" ? event.message.stopReason : null,
+          errorMessage: typeof event.message.errorMessage === "string" ? event.message.errorMessage : "",
+        };
         if (streamEnabled) notify?.(`[${label}] 💬 ${truncate(finalText, 220)}`);
       } else if (streamEnabled && event.type === "tool_execution_start") {
         notify?.(`[${label}] 🔧 ${event.toolName} ${truncate(JSON.stringify(event.args ?? {}), 140)}`);
@@ -1262,25 +1363,57 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    child.on("error", (error) => reject(new Error(`Could not start Pi ${role} agent: ${error.message}`)));
+    child.on("error", (error) => reject(agentFailureError(
+      `Could not start Pi ${role} agent: ${error.message}`,
+      { kind: "spawn", errorMessage: error.message, stderr: "" },
+    )));
     child.on("close", (code, signal) => {
       if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+      const stderrTail = stderr.slice(-1200).trim();
+      const failure = {
+        exitCode: code,
+        signal: signal || null,
+        errorMessage: lastAssistant?.errorMessage || "",
+        stderr: stderr.slice(-1200),
+        partialText: finalText || "",
+      };
       if (code !== 0) {
         const hint = classifyAgentFailure(stderr);
-        reject(new Error(`Pi ${role} agent failed (exit ${code ?? "unknown"}${signal ? `, ${signal}` : ""})${hint ? ` [likely ${hint}]` : ""}: ${stderr.slice(-1200).trim()}`));
+        reject(agentFailureError(
+          `Pi ${role} agent failed (exit ${code ?? "unknown"}${signal ? `, ${signal}` : ""})${hint ? ` [likely ${hint}]` : ""}: ${stderrTail}`,
+          { ...failure, kind: "exit" },
+        ));
+        return;
+      }
+      // `--mode json` exits 0 even when the final assistant message errored
+      // (only text mode maps stopReason "error"/"aborted" to exit 1), so the
+      // stop reason must be inspected explicitly. Partial text on an errored
+      // turn is a truncated report, never a valid one.
+      if (lastAssistant?.stopReason === "error") {
+        reject(agentFailureError(
+          `Pi ${role} agent stream ended with error: ${lastAssistant.errorMessage || "unknown provider error"}`,
+          { ...failure, kind: "stream-error" },
+        ));
+        return;
+      }
+      if (lastAssistant?.stopReason === "aborted") {
+        reject(agentFailureError(
+          `Pi ${role} agent run was aborted${lastAssistant.errorMessage ? `: ${lastAssistant.errorMessage}` : ""}`,
+          { ...failure, kind: "aborted" },
+        ));
         return;
       }
       if (!finalText) {
         const hint = classifyAgentFailure(stderr);
-        reject(new Error(`Pi ${role} agent ended without a final assistant message${hint ? ` [likely ${hint}]` : ""}: ${stderr.slice(-1200).trim()}`));
+        reject(agentFailureError(
+          `Pi ${role} agent ended without a final assistant message${hint ? ` [likely ${hint}]` : ""}: ${stderrTail}`,
+          { ...failure, kind: "no-final-message" },
+        ));
         return;
       }
       resolve({ finalText, stderr, usage: usageEntry({ role, round, stats }) });
     });
   });
-
-  notify?.(`${developer ? "Development" : "Review"} agent: round ${round} finished.`);
-  return output;
 }
 
 /**
@@ -1556,6 +1689,9 @@ function stateStatus(state, paths, usageLines = []) {
     `Round: ${state.currentRound}/${state.config.maxReviewRounds}`,
     `Developer model: ${state.config.developerModel}${state.config.developerThinking ? ` · thinking ${state.config.developerThinking}` : ""}`,
     `Reviewer model: ${state.config.reviewerModel}${state.config.reviewerThinking ? ` · thinking ${state.config.reviewerThinking}` : ""}`,
+    ...(state.config.devSkills?.length
+      ? [`Dev skills: ${state.config.devSkills.join(", ")}`]
+      : []),
     `Active role: ${state.phase === "review" ? `review r${state.currentRound}` : state.phase === "development" ? `dev r${state.currentRound + 1}` : state.phase || "-"}`,
     `Open issues: ${state.openIssues.length ? state.openIssues.map((issue) => issue.id).join(", ") : "none"}`,
     `Artifacts: ${relativeTo(state.projectRoot, paths.root)}`,
@@ -1582,6 +1718,47 @@ async function usageStatusLines(paths) {
     .map((role) => `Usage ${role === "developer" ? "dev" : "review"} r${latest.get(role).round}: ${latest.get(role).line}`);
 }
 
+/**
+ * Resolve `--dev-skill` values to concrete absolute paths and fail fast on typos.
+ *
+ * Roles run with `--no-skills`, so each entry is an explicit path handed to pi's
+ * repeatable `--skill` flag (a skill file or a directory holding SKILL.md).
+ * Validation belongs at init/configure time: a missing path discovered in round 3
+ * has already burned the rounds that were supposed to use the skill. Relative
+ * paths resolve against the invocation cwd and are frozen absolute in the state,
+ * so a later run from another directory still injects the same skills.
+ */
+function normalizeDevSkills(values, cwd, { home = os.homedir() } = {}) {
+  if (values === undefined || values === null) return undefined;
+  const list = Array.isArray(values) ? values : [values];
+  if (!list.length) return undefined;
+  const resolved = [];
+  for (const raw of list) {
+    const value = String(raw).trim();
+    if (!value) throw new Error("--dev-skill requires a skill file or directory path");
+    const expanded = value === "~"
+      ? home
+      : value.startsWith("~/")
+        ? path.join(home, value.slice(2))
+        : value;
+    const target = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+    if (!existsSync(target)) {
+      throw new Error(`--dev-skill path does not exist: ${value} (resolved to ${target})`);
+    }
+    let canonical = target;
+    try {
+      canonical = realpathSync(target);
+    } catch {
+      // Keep the resolved path if the filesystem refuses to canonicalize it.
+    }
+    if (existsSync(canonical) && statSync(canonical).isDirectory() && !existsSync(path.join(canonical, "SKILL.md"))) {
+      throw new Error(`--dev-skill directory has no SKILL.md: ${value} (resolved to ${canonical})`);
+    }
+    if (!resolved.includes(canonical)) resolved.push(canonical);
+  }
+  return resolved;
+}
+
 function mergeConfig(state, options, { requireModels = false, defaults = {} } = {}) {
   const current = state?.config ?? {};
   let developerModel = options.developerModel
@@ -1605,6 +1782,11 @@ function mergeConfig(state, options, { requireModels = false, defaults = {} } = 
       ?? current.developerResetAfterRounds
       ?? defaults.developerResetAfterRounds
       ?? DEFAULT_DEVELOPER_RESET_AFTER_ROUNDS,
+    agentRetries: options.agentRetries
+      ?? current.agentRetries
+      ?? defaults.agentRetries
+      ?? DEFAULT_AGENT_RETRIES,
+    devSkills: options.devSkills ?? current.devSkills ?? defaults.devSkills ?? DEFAULT_DEV_SKILLS,
     testCommands: options.tests.length ? options.tests : (current.testCommands ?? defaults.testCommands ?? []),
     developerThinking: options.developerThinking ?? current.developerThinking ?? defaults.developerThinking ?? null,
     reviewerThinking: options.reviewerThinking ?? current.reviewerThinking ?? defaults.reviewerThinking ?? null,
@@ -1669,6 +1851,8 @@ async function initializeWorkflow(cwd, positionals, options) {
 
   const defaults = await loadWorkflowDefaults();
   const config = mergeConfig(null, options, { requireModels: true, defaults });
+  // Validated and frozen absolute before anything is written on disk.
+  config.devSkills = normalizeDevSkills(config.devSkills, cwd) ?? [];
   const planHash = hashBuffer(planContents);
   const key = workflowKeyForPlan(planSource, planHash, options.workflow);
   const paths = workflowPaths(
@@ -1713,6 +1897,7 @@ async function initializeWorkflow(cwd, positionals, options) {
     `- Plan: \`${relativeTo(projectRoot, planSource)}\` · sha256 \`${planHash.slice(0, 8)}…\``,
     `- Base commit: \`${baseHead}\``,
     `- Developer: \`${config.developerModel}\` · Reviewer: \`${config.reviewerModel}\` · Max rounds: ${config.maxReviewRounds}`,
+    config.devSkills.length ? `- Developer skills (--skill): ${config.devSkills.map((skill) => `\`${skill}\``).join(", ")}` : "",
     `- Created: ${localNow()} (${localTimezoneLabel()})`,
     "",
   ]);
@@ -1730,6 +1915,7 @@ async function configureWorkflow(cwd, options) {
   if (state.status === "running") throw new Error("Cannot configure a workflow marked running");
   const defaults = await loadWorkflowDefaults();
   state.config = mergeConfig(state, options, { requireModels: true, defaults });
+  state.config.devSkills = normalizeDevSkills(state.config.devSkills, cwd) ?? [];
   state.updatedAt = now();
   await writeJson(initialPaths.state, state);
   await writeActiveWorkflow(projectRoot, initialPaths, state);
@@ -1838,6 +2024,7 @@ async function resolveWorkflow(cwd, positionals, options) {
     throw new Error("resolve accepts at most one decision file path");
   }
   if (options.maxRounds) state.config.maxReviewRounds = options.maxRounds;
+  if (options.agentRetries !== undefined) state.config.agentRetries = options.agentRetries;
   state.pendingHumanDecisionPath = relativeTo(projectRoot, destination);
   state.status = "ready";
   state.phase = "idle";
@@ -2011,7 +2198,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       }
       review = normalizeReviewerReport(extractJsonObject(reviewerOutput.finalText), round, state.openIssues);
     } catch (error) {
-      const rawTextPath = await writeProtocolRawText(paths, "reviewer", round, reviewerOutput?.finalText);
+      const rawTextPath = await writeProtocolRawText(paths, "reviewer", round, reviewerOutput?.finalText || error?.agentFailure?.partialText);
       await escalate("reviewer-protocol-or-execution-error", {
         summary: error.message,
         ...(rawTextPath ? { rawTextPath: relativeTo(projectRoot, rawTextPath) } : {}),
@@ -2135,6 +2322,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     }
   }
   if (options.maxRounds) state.config.maxReviewRounds = options.maxRounds;
+  if (options.agentRetries !== undefined) state.config.agentRetries = options.agentRetries;
+  // Explicit on resume means "replace the frozen list"; omitting it keeps the state value.
+  if (options.devSkills !== undefined) state.config.devSkills = normalizeDevSkills(options.devSkills, cwd) ?? [];
   if (state.currentRound >= state.config.maxReviewRounds) {
     await escalate("max-rounds", {
       summary: `The configured limit of ${state.config.maxReviewRounds} review rounds was reached before a pass.`,
@@ -2172,7 +2362,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       state.currentRound = round;
       // Surface the developer's actual report/questions in the escalation when the
       // failure is a protocol-validation error (the agent did answer, just malformed).
-      const finalText = typeof developerOutput?.finalText === "string" ? developerOutput.finalText : "";
+      const finalText = typeof developerOutput?.finalText === "string" && developerOutput.finalText
+        ? developerOutput.finalText
+        : (typeof error?.agentFailure?.partialText === "string" ? error.agentFailure.partialText : "");
       let rawReport = null;
       try {
         rawReport = extractJsonObject(finalText);
@@ -2328,6 +2520,7 @@ ${result.message}`,
 export {
   DEFAULT_ARTIFACT_DIR,
   addUsageRequest,
+  agentFailureRetryable,
   blockedNotice,
   classifyAgentFailure,
   createUsageStats,
@@ -2338,6 +2531,7 @@ export {
   adoptWorkflow,
   localNow,
   localTimezoneLabel,
+  normalizeDevSkills,
   normalizeDeveloperReport,
   normalizeReviewerReport,
   planChangedSinceFrozen,

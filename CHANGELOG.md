@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.11.0 — 2026-09-16
+
+- **子 agent 瞬时故障自动重试**（真实事故：b2a 工作流 review r2，reviewer 已跑 30 个请求/21 分钟，上游网关在最后一条消息上 `stream_read_error` 断流；pi 在 `--mode json` 下对最终 assistant 消息 `stopReason: "error"` **仍然 exit 0**，引擎只靠“没有最终文本”兜住，随后直接 block，无重试）：
+  - 执行层新增重试：`invokePiAgent` 拆成外层重试循环 + `spawnPiAgentOnce` 单次进程；仅对**瞬时执行故障**重试（`stream_read_error` 等 provider 流中断、网络/超时、异常退出、无最终消息），默认 2 次（3 次尝试），指数退避 5s/10s；额度/鉴权失败、`stopReason: "aborted"`、spawn 失败不重试。协议错误（报告 JSON/schema 不合法）仍直接升级，不自动重试。
+  - 重试复用同一 session id：pi 生成 provider 输入时会跳过 `stopReason: "error"/"aborted"` 的 assistant 轮次，因此重试接着出错前的 transcript 跑，不丢已完成的工作。
+  - 检测修正：直接读取最终 assistant 消息的 `stopReason`/`errorMessage`（不再只靠空文本兜底）——带部分文本的断流也不会被当成报告去解析；错误对象携带 `kind`/`exitCode`/`errorMessage`/`stderr`/`partialText`，部分文本仍会落盘 `*.raw.txt`。
+  - 可观测：每次重试写一条 `agent-retry` 时间线 + `[dev/review rN] ⚠️ attempt 1/3 failed: stream_read_error — retrying in 5s` 通知；最终失败的 escalation 摘要带 `(after N/M attempts)` 与真实错误码；usage 按轮次聚合所有尝试（失败尝试的 token 不再丢失）。
+  - 配置：`--agent-retries <n>`（init/configure/run/resolve 可用，`0` 关闭）、`defaults.json` / `local.json` 默认值、`dev_review_start` 工具新增 `agent_retries` 参数；老实例没有该字段时回退默认 2。
+  - 新增 `agent-retry` 单测 + 假 pi 端到端（流中断重试后跑通、带部分文本断流、额度失败不重试）；退避基准可用 `DEV_REVIEW_RETRY_BASE_MS` 覆盖（测试/调试）。
+- **给 developer 注入技能（`--dev-skill`，不硬编码任何技能清单）**：子 agent 一直以 `--no-skills` 启动（结果不受本机 skills 目录漂移影响），需要专门指导时没有任何通道，只能改角色提示词。现在加一条显式通道，且只给 developer：
+  - `--dev-skill <path>`（init/start/run/configure 可用，可重复）：目录（含 `SKILL.md`）或单个技能文件；`~` 展开，相对路径按调用时的 cwd 解析。引擎只在 developer 进程上追加 pi 的 `--skill <path>`（pi 语义：`--no-skills` 下显式 `--skill` 仍然叠加生效）；reviewer 进程永远拿不到技能——它的价值在独立性，喂指导反而污染判断。
+  - 校验前置 + 冻结：init/configure 时逐条 `existsSync`（目录还必须含 `SKILL.md`），失败即终止（避免第 3 轮才发现技能根本没生效）；解析结果 canonicalize 为绝对路径写进 `state.json`，`/dev-review status` 输出 `Dev skills:` 行、timeline 初始化段落记 `Developer skills (--skill):`，随时可审计。
+  - 三层来源，复用现有配置优先级：主 agent `dev_review_start({ dev_skills: [...] })`（推荐——它看过计划内容，知道这批动不动 SwiftUI）/ 用户手输 `--dev-skill` / 项目默认 `local.json` 的 `devSkills`；`defaults.json` 默认 `[]`，老实例缺该字段按空列表处理、行为不变；`configure --dev-skill`（或 `run --dev-skill`）整体替换冻结清单。
+  - 计划文件里写 `## 注入技能` 一节时，主 agent 把其中路径转成 `dev_skills` 参数（引擎不解析计划——不做语义解析，只是工具描述里约定了这个交接）；技能需求因此和计划一起冻结、一起评审。
+  - 新增 `dev-skills.test.mjs`（6 用例：纯函数解析/~ 展开/去重/坏路径拒绝，端到端只注入 developer 且 reviewer 无 `--skill`，含空格路径过 CLI tokenizer，缺失路径 fail fast 且不落盘，run/configure 替换与校验）。
+- **产物目录命名引导修正（只改文案/工具描述，无行为变化）**：`dev_review_start` 原来的 label 描述写「use a distinct label per batch sharing the same plan file」，诱使主 agent 给每个批次编造 `b1a`/`b2b` 这类裸批次 label；而 label 是**整体替换**计划文件名派生的目录名（不是前缀），版本号因此从目录名消失（真实例子：dieMoney 的 `.ai-dev-review/b2c--da037be4` 而不是 `v1-2-b2c-settings-ia-fix-plan--da037be4`）。现在统一口径（工具描述 + `--workflow` 帮助 + README §3.1 + plan 模板）：每批一份 plan 文件时**不传 label**，默认目录名已自带版本+批次+主题；只有同一份 plan 要跑第二个独立实例时才传，且带版本（如 `v1.2-b2c-rerun`）。已存在的目录不动。
 ## 0.10.1 — 2026-09-13
 
 - **无人值守批跑：停机唤醒自动注入处理指令**（`index.ts`，无引擎改动）：项目里存在 `.ai-dev-review/unattended-queue.md`（= 批次进行中）时，后台运行结束的唤醒消息不再写「请把阻塞原因转述给用户」（这句与无人值守直接冲突、会把队列卡死等用户），改为无人值守三步指令：① 先分析本次停机——能验证/可继续的 `dev_review_resolve` + `dev_review_run`，验证不了或需人拍板的跳过；② 该 plan 收尾——工作树 commit 到无人值守分支（message 带 `遗留:` 清单），跳过/blocked 的 WIP park 后 reset 回干净基础；③ 启动下一项，全部跑完写值守报告。主 agent 不再依赖上下文记忆里的协议；非无人值守场景文案不变。

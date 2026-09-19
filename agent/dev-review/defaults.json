@@ -2,6 +2,8 @@
   "schemaVersion": 1,
   "maxReviewRounds": 10,
   "developerResetAfterRounds": 4,
+  "agentRetries": 2,
+  "devSkills": [],
   "testCommands": [],
   "developerThinking": null,
   "reviewerThinking": null

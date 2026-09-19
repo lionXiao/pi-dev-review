@@ -35,3 +35,17 @@ When the user later explicitly confirms the draft, update its status to **Confir
 ```
 
 If the current worktree intentionally contains the feature work that should be reviewed, include `--allow-dirty` in that suggested command.
+
+Do **not** invent a `--workflow <label>` / `dev_review_start` `label` just to shorten the artifact folder: the folder is named after the plan file (`<plan-stem>--<plan-hash>`), which already carries version + batch + topic. A label **replaces** that name (it is not a prefix), so a bare batch label hides the version. Pass a label only for a second independent instance of the same plan file, and include the version (e.g. `v1.2-b2c-rerun`).
+
+## Developer skills (optional)
+
+If this batch needs specialized guidance (for example a SwiftUI or accessibility skill), declare the exact skill paths in a plan section titled `## 注入技能`:
+
+```markdown
+## 注入技能
+
+- ~/.pi/agent/skills/xcode/swiftui-specialist
+```
+
+Subagents run with skill discovery disabled (`--no-skills`), so the plan section is the auditable place to record the need. When starting the workflow, the main agent reads this section and passes the paths as `dev_skills: [...]` to `dev_review_start` (or one `--dev-skill <path>` per entry on the CLI). Skills go to the developer process only; the reviewer never receives them. Every path is validated at start (a directory must contain `SKILL.md`), and start fails fast if one is missing.

@@ -77,8 +77,11 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 ```
 
 - `--test` 可多次（每轮 dev/reviewer 都要跑）
+- `--agent-retries <n>`：单次 agent 运行因**瞬时执行故障**（provider 流中断、网络/超时、子进程异常退出）失败时自动重试次数（默认 2，即最多 3 次尝试；`0` 关闭）。额度/鉴权失败、用户中止与协议错误（报告 JSON 不合法）不重试。也可写在 `defaults.json` / `local.json`，或 `configure --agent-retries <n>` 覆盖到已有实例。
+- `--dev-skill <path>`：只给 developer 注入一个 Pi 技能（可重复，见 §3.4）；reviewer 永远不注入。
 - 工作树有"故意要被评审的代码"时加 `--allow-dirty`（仅 start 检查，run 不检查）
 - **多批次总纲 plan**（一份文件多个批次、已验证部分批次）：引擎**不会拆分文件**，dev/reviewer 按文件里的「当前执行批次」标记执行；每次改 plan 内容 → 新 hash → 新实例。主 agent 用 `dev_review_start` 启动这类 plan 时会先返回提醒，让你选 (a) 按当前批次口径直接开始（`confirm_master_plan=true`），还是 (b) 先把这一批的子 plan/范围/做法聊定再启动；你手输 `/dev-review start` 则视为已拍板、直接开始。
+- **产物目录命名（每批一个 plan 文件时不要传 label）**：默认目录名 = `<plan 文件名去扩展名>--<plan 内容 hash 前8位>`，例如 `v1-2-b2c-settings-ia-fix-plan--da037be4`——版本、批次、主题、计划版本一眼可辨（改过 plan 内容会得到新 hash 新目录）。`--workflow <label>` 是**整体替换**这个名字而不是前缀：传 `b2c` 只会得到 `b2c--da037be4`，版本号就没了。所以只有「同一份 plan 要跑出第二个独立实例」（重跑/对照实验）才传 label，并且带上版本，如 `v1.2-b2c-rerun`。
 - 模型可写在 `local.json`，start 时不用传
 
 ### 3.2 blocked 时的三种回应方式（任选，效果等价）
@@ -123,13 +126,30 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 - token 统计：引擎按 role+round 写 `reports/usage.json`，`/dev-review status` / `dev_review_status` 输出 `Usage dev/review rN:` 行，timeline 的 dev/review 行尾也附同一摘要。口径：命中率公式与 pi 主状态栏一致（`cacheRead / (input + cacheRead + cacheWrite)`）；**TTFT = 子进程发出 provider 请求 → 首个内容 token**（标准客户端首字口径，含建连、请求上传、网关排队，不含 pi 启动），括号内 `setup` 是其中「请求发出 → SSE 响应头」的准备段；`tok/s` 只算解码段（首 token → 结束，含 reasoning）；
 - **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked(reason)/passed），不依赖谁启动的；
 - **事后补报**：如果运行在扩展观察窗口之外结束（bash 拉起未走扩展、或 block 发生在 reload 之前），下一个回合会自动补报一次停止原因，状态栏与 `dev_review_status` 都带 `blocked (reason)`；
+- **瞬时故障自动重试**：子 agent 因 provider 流中断（如 `stream_read_error`）、网络/超时、异常退出而未产出最终报告时，引擎按 `--agent-retries`（默认 2）自动重跑该轮（复用同一 session；pi 会把出错的那次 assistant 轮次从 provider 输入里剔掉，再接着跑），每次重试写一条 `agent-retry` 时间线；重试仍失败才升级为 `*-protocol-or-execution-error`，摘要里带尝试次数与真实错误码。额度/鉴权失败、用户中止、报告 JSON 协议错误一律不重试（重试也治不好，直接叫人）。
 - **统一时间线**：每个实例有 `reports/timeline.md`，按时间顺序记「plan 冻结 → dev rN → review rN → 决策/升级 → pass」，一行一个事件（时间戳 + 轮次 + 结果 + 摘要 + 产物路径）；running/blocked/ready 时编辑器下方 widget 显示相对路径，`dev_review_status` 输出 `Timeline:` 行；
 - 随时查询：`dev_review_status` 工具或 `/dev-review status`，blocked 时输出原因、摘要与决策问题/选项，另带 `[run]` 行；
 - 同一时间只允许一个后台运行，重复启动会被拒绝；
-- 新建实例用 `dev_review_start`（工具，plan 哈希变化/新批次必需）；`dev_review_run` 只续跑已有实例，两者都走后台上进；
+- 新建实例用 `dev_review_start`（工具，plan 哈希变化/新批次必需；可用 `dev_skills` 注入 developer 技能，见 §3.4）；`dev_review_run` 只续跑已有实例，两者都走后台上进；
 - 目前不提供中途取消（引擎无 abort 接口）：要停只能等到停止条件，或 `/dev-review escape` 挂起纪律后手动处理。
 
-### 3.4 日常命令
+### 3.4 developer 技能注入（`--dev-skill`）
+
+子 agent 默认带 `--no-skills` 启动（不发现本机技能，结果不受机器上装了什么影响）。需要专门指导时，由**调用方显式注入**，且只给 developer：
+
+```text
+# 可重复
+/dev-review start docs/prd/plan.md \
+  --dev-skill ~/.pi/agent/skills/xcode/swiftui-specialist \
+  --dev-skill /path/to/skill-dir
+```
+
+- **只影响 developer**：reviewer 永远拿不到技能——它的价值在独立性，喂指导反而污染判断。
+- 路径可以是技能目录（含 `SKILL.md`）或单个技能文件；`~` 会展开，相对路径按命令执行目录解析。init/run/configure 时逐条校验并**冻结为绝对路径**写进 `state.json`，`status` 与 timeline 里可见；路径写错立即失败，不会等到第 3 轮才发现。
+- 技能清单**冻结在实例上**：已启动的实例后来改了 `local.json` 也不会变（要改用 `configure --dev-skill <path>` 或 `run --dev-skill <path>`，会整体替换）。
+- 三种调用方式各有分工：主 agent 用 `dev_review_start({ dev_skills: [...] })`（推荐，它看过计划内容）；用户手输用 `--dev-skill`；项目级默认写 `local.json` 的 `devSkills`。计划文件里若有 `## 注入技能` 一节，主 agent 应把其中路径转成 `dev_skills` 参数，让技能需求和计划一起冻结、一起评审。
+
+### 3.5 日常命令
 
 ```text
 /dev-review status     # 状态（blocked 时把 escalation 摘要也展示）
@@ -226,4 +246,5 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 - 修改 `workflow.mjs` / 扩展 / `discipline.md` 后**必须完全重启 pi**（不是 `/reload`）：pi 用 jiti 加载扩展，`/reload` 只会重新读取 `index.ts` 入口，它 import 的本地 `.mjs` 模块被 Node ESM 缓存冻结在进程启动版本（旧版可能报错或静默用旧逻辑）；CLI 直跑（`node .../workflow.mjs <cmd>`）永远用磁盘上的最新版本。
 - **统一时间线**：每个工作流实例的 `reports/timeline.md` 按时间顺序记录 dev/review/决策全过程（`dev_review_status` 输出的 `Timeline:` 行、底部状态 widget、停止唤醒消息都会给出路径）。
 - 测试命令要自足：agent 环境变量依赖（如录制开关）必须在命令里显式写出，否则会出现"循环重试永远失败"。
+- 自动重试为指数退避（默认 5s、10s……），基准可用 `DEV_REVIEW_RETRY_BASE_MS`（毫秒）覆盖，调试/测试用。
 - 多工作流：串行为主；真要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。

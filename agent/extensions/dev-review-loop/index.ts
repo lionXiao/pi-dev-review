@@ -767,8 +767,8 @@ export default function (pi: any) {
     description:
       "Start a NEW dev-review workflow instance for a plan, in the background (non-blocking). " +
       "Instances are keyed by plan content hash + label: use this when no instance exists for the current plan " +
-      "(first batch, or the plan file was amended so its hash changed), or when you need a separate instance per " +
-      "batch via label. dev_review_run only resumes an existing instance. Progress widget + completion summary " +
+      "(first batch, or the plan file was amended so its hash changed), or when the same plan file must yield " +
+      "another independent instance (pass a versioned label then). dev_review_run only resumes an existing instance. Progress widget + completion summary " +
       "are the same as dev_review_run. " +
       "IMPORTANT for multi-batch master plans: if the plan contains a current-batch marker (e.g. `当前执行批次`), " +
       "this tool first returns an advisory instead of starting. Ask the user which they want — (a) start the written " +
@@ -778,7 +778,19 @@ export default function (pi: any) {
       plan: Type.String({ description: "Path to the plan file, e.g. docs/prd/v1.2-refactor-plan.md" }),
       test: Type.Optional(Type.String({ description: "Test command recorded in the workflow (combined string; quote inside is fine)" })),
       max_rounds: Type.Optional(Type.Number({ description: "Override max review rounds" })),
-      label: Type.Optional(Type.String({ description: "Workflow label; use a distinct label per batch sharing the same plan file" })),
+      agent_retries: Type.Optional(Type.Number({ description: "Automatic retries per agent run on transient execution failures (default from defaults.json)" })),
+      dev_skills: Type.Optional(Type.Array(Type.String(), {
+        description:
+          "Skill paths injected into the developer sub-agent only (pi --skill; file or directory). " +
+          "Roles otherwise run with --no-skills, so this is the only way they see a skill. " +
+          "The reviewer never gets skills. Read from the plan's `## 注入技能` section when present.",
+      })),
+      label: Type.Optional(Type.String({
+        description:
+          "Only for a second independent instance from the SAME plan file (re-runs). It REPLACES the plan-derived " +
+          "artifact folder name (not a prefix), so include the version — e.g. `v1.2-b2c-rerun`. Omit it by default: " +
+          "the folder is named `<plan-stem>--<plan-hash>`, which already carries version + batch + topic.",
+      })),
       confirm_master_plan: Type.Optional(Type.Boolean({ description: "Set true only after the user chose to start a multi-batch master plan as-is" })),
     }),
     async execute(toolCallId: any, params: any, signal: any, onUpdate: any, ctx: any) {
@@ -809,6 +821,9 @@ export default function (pi: any) {
       const args = ["start", params.plan];
       if (params.test) args.push("--test", JSON.stringify(String(params.test)));
       if (params.max_rounds) args.push("--max-rounds", String(params.max_rounds));
+      if (params.agent_retries !== undefined) args.push("--agent-retries", String(params.agent_retries));
+      // JSON.stringify keeps paths with spaces intact through the engine's shell-like tokenizer.
+      for (const skill of params.dev_skills ?? []) args.push("--dev-skill", JSON.stringify(String(skill)));
       if (params.label) args.push("--workflow", params.label);
       const started = startBackgroundRun(args.join(" "), ctx);
       return { content: [{ type: "text", text: started.message }], details: {} };
