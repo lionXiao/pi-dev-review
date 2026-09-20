@@ -86,12 +86,29 @@ test("normalizeDevSkills: resolves, expands ~, dedupes, and rejects bad paths", 
     assert.deepEqual(normalizeDevSkills(["~/global-skill"], root, { home }), [homeSkill]);
 
     const fileSkill = join(root, "single.md");
-    await writeFile(fileSkill, "# single-file skill\n", "utf8");
+    await writeFile(fileSkill, "---\nname: single\ndescription: single-file skill\n---\n\n# single-file skill\n", "utf8");
     assert.deepEqual(normalizeDevSkills([fileSkill], root), [fileSkill], "pi --skill also accepts a skill file");
+
+    const blockSkill = join(root, "block.md");
+    await writeFile(blockSkill, "---\nname: block\ndescription: |\n  first line\n  second line\n---\nbody\n", "utf8");
+    assert.deepEqual(normalizeDevSkills([blockSkill], root), [blockSkill], "YAML block scalars carry a usable description");
 
     assert.throws(() => normalizeDevSkills(["skills/missing"], root), /does not exist/);
     await mkdir(join(root, "not-a-skill"), { recursive: true });
     assert.throws(() => normalizeDevSkills(["not-a-skill"], root), /has no SKILL\.md/);
+
+    // pi's loadSkillFromFile silently drops these; the validator must fail them here.
+    await mkdir(join(root, "no-frontmatter"), { recursive: true });
+    await writeFile(join(root, "no-frontmatter", "SKILL.md"), "# just a heading\n", "utf8");
+    assert.throws(() => normalizeDevSkills(["no-frontmatter"], root), /no usable frontmatter description/);
+
+    await mkdir(join(root, "empty-description"), { recursive: true });
+    await writeFile(join(root, "empty-description", "SKILL.md"), "---\nname: empty\ndescription:\n---\n\nbody\n", "utf8");
+    assert.throws(() => normalizeDevSkills(["empty-description"], root), /no usable frontmatter description/);
+
+    const unterminated = join(root, "unterminated.md");
+    await writeFile(unterminated, "---\ndescription: \"unterminated\n---\n\nbody\n", "utf8");
+    assert.throws(() => normalizeDevSkills([unterminated], root), /no usable frontmatter description/);
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
@@ -177,6 +194,34 @@ test("run: a missing --dev-skill path fails fast before any agent runs", async (
 
     assert.equal(result.ok, false);
     assert.match(result.message, /--dev-skill path does not exist: skills\/typo/);
+    assert.equal(existsSync(join(stateDir, "argv-developer-g1.json")), false, "no agent was spawned");
+    assert.equal(existsSync(join(root, ".ai-dev-review")), false, "nothing was initialized");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("run: a --dev-skill pi would silently ignore fails fast before any agent runs", async () => {
+  const { root, stateDir, script } = await skillsFixture();
+  try {
+    const skill = join(root, "skills", "no-frontmatter");
+    await mkdir(skill, { recursive: true });
+    await writeFile(join(skill, "SKILL.md"), "# a heading is not frontmatter\n", "utf8");
+    const result = await runWithEnv({
+      DEV_REVIEW_DEVELOPER_MODEL: "fake/dev",
+      DEV_REVIEW_REVIEWER_MODEL: "fake/rev",
+      FAKE_PI_STATE_DIR: stateDir,
+    }, () => runCommand({
+      args: `start PLAN.md --allow-dirty --dev-skill ${JSON.stringify(realpathSync(skill))}`,
+      cwd: root,
+      piInvocation: { command: process.execPath, args: [script] },
+      notify: () => {},
+      onReport: async () => {},
+    }));
+
+    assert.equal(result.ok, false);
+    assert.match(result.message, /no usable frontmatter description/);
     assert.equal(existsSync(join(stateDir, "argv-developer-g1.json")), false, "no agent was spawned");
     assert.equal(existsSync(join(root, ".ai-dev-review")), false, "nothing was initialized");
   } finally {

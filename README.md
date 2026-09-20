@@ -145,7 +145,7 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 ```
 
 - **只影响 developer**：reviewer 永远拿不到技能——它的价值在独立性，喂指导反而污染判断。
-- 路径可以是技能目录（含 `SKILL.md`）或单个技能文件；`~` 会展开，相对路径按命令执行目录解析。init/run/configure 时逐条校验并**冻结为绝对路径**写进 `state.json`，`status` 与 timeline 里可见；路径写错立即失败，不会等到第 3 轮才发现。
+- 路径可以是技能目录（含 `SKILL.md`）或单个技能文件；`~` 会展开，相对路径按命令执行目录解析。init/run/configure 时逐条校验并**冻结为绝对路径**写进 `state.json`，`status` 与 timeline 里可见；路径写错、目录缺 `SKILL.md`、或技能 frontmatter 没有可用的 `description`（pi 会静默忽略这种技能）都会立即失败，不会等到第 3 轮才发现。
 - 技能清单**冻结在实例上**：已启动的实例后来改了 `local.json` 也不会变（要改用 `configure --dev-skill <path>` 或 `run --dev-skill <path>`，会整体替换）。
 - 三种调用方式各有分工：主 agent 用 `dev_review_start({ dev_skills: [...] })`（推荐，它看过计划内容）；用户手输用 `--dev-skill`；项目级默认写 `local.json` 的 `devSkills`。计划文件里若有 `## 注入技能` 一节，主 agent 应把其中路径转成 `dev_skills` 参数，让技能需求和计划一起冻结、一起评审。
 

@@ -10,7 +10,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rename, writeFile, appendFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -2454,6 +2454,62 @@ async function usageStatusLines(paths) {
 }
 
 /**
+ * Read the `description` from a skill file the way pi does, returning null when
+ * pi would silently ignore the skill. pi's loadSkillFromFile drops any skill
+ * whose frontmatter YAML has no non-empty string `description` (explicit
+ * `--skill` paths get no visible warning at all). Mirrors pi's
+ * parseFrontmatter/loadSkillFromFile rules but stays permissive: it only
+ * rejects descriptions that are definitely unusable, so an exotic-but-valid
+ * YAML form is never blocked here.
+ */
+function readSkillDescription(filePath) {
+  let raw = "";
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (error) {
+    throw new Error(`--dev-skill could not read ${filePath}: ${error.message}`);
+  }
+  // pi normalizes line endings before looking for the frontmatter block.
+  const text = raw.replace(/\r\n?/g, "\n");
+  if (!text.startsWith("---")) return null;
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) return null;
+  const lines = text.slice(4, end).split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^description[ \t]*:[ \t]*(.*)$/.exec(lines[index]);
+    if (!match) continue;
+    const inline = match[1].trim();
+    if (!inline || inline === "null" || inline === "~") return null;
+    // YAML block scalar: `|`, `>`, `|-`, `>-`, `|2`, `>+2`, ...
+    if (/^[|>][+-]?[0-9]*$/.test(inline)) {
+      const block = [];
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        const line = lines[cursor];
+        if (line.trim() === "") {
+          block.push("");
+          continue;
+        }
+        if (!/^[ \t]/.test(line)) break; // dedent ends the block
+        block.push(line);
+      }
+      return block.join("\n").trim() || null;
+    }
+    // Quoted scalar: trust it when the closing quote is on the same line.
+    const quote = inline[0];
+    if (quote === "\"" || quote === "'") {
+      const close = inline.indexOf(quote, 1);
+      return close > 0 && inline.slice(1, close).trim() ? inline.slice(1, close) : null;
+    }
+    // Plain scalar: a trailing comment is not part of the value; YAML
+    // collections are objects/arrays, which pi rejects as non-strings.
+    const value = inline.replace(/[ \t]+#.*$/, "").trim();
+    if (!value || value.startsWith("[") || value.startsWith("{")) return null;
+    return value;
+  }
+  return null;
+}
+
+/**
  * Resolve `--dev-skill` values to concrete absolute paths and fail fast on typos.
  *
  * Roles run with `--no-skills`, so each entry is an explicit path handed to pi's
@@ -2486,8 +2542,16 @@ function normalizeDevSkills(values, cwd, { home = os.homedir() } = {}) {
     } catch {
       // Keep the resolved path if the filesystem refuses to canonicalize it.
     }
-    if (existsSync(canonical) && statSync(canonical).isDirectory() && !existsSync(path.join(canonical, "SKILL.md"))) {
+    const isDirectory = existsSync(canonical) && statSync(canonical).isDirectory();
+    const skillFile = isDirectory ? path.join(canonical, "SKILL.md") : canonical;
+    if (isDirectory && !existsSync(skillFile)) {
       throw new Error(`--dev-skill directory has no SKILL.md: ${value} (resolved to ${canonical})`);
+    }
+    if (!readSkillDescription(skillFile)) {
+      throw new Error(
+        `--dev-skill skill has no usable frontmatter description, so pi would silently ignore it: ${value} (${skillFile}). ` +
+          "Add a YAML frontmatter block with a non-empty `description` (and optionally `name`) at the top of the file.",
+      );
     }
     if (!resolved.includes(canonical)) resolved.push(canonical);
   }

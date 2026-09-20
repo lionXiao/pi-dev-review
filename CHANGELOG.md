@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — dev-skill 校验与 pi 的加载规则对齐
+
+- **`--dev-skill` 现在会拒绝 pi 实际会静默忽略的技能**（真实场景：技能目录里 `SKILL.md` 存在但没有 frontmatter，或 `description` 为空/不可解析——pi 的 `loadSkillFromFile` 会返回 `{skill:null}`，显式 `--skill` 路径连 warning 都不显示）。旧校验只查「文件/目录存在、目录含 `SKILL.md`」，这种技能能通过 init/configure，直到第 3 轮以「技能没生效」的形式暴露。现在按 pi 的规则（frontmatter 可解析且 `description` 为非空字符串）在 init/run/configure 前置失败，错误信息直接给出文件路径和修法；兼容 inline/引号/块标量（`|`、`>`）等 YAML 写法，本机 17 个真实技能全部通过（无误报）。
+- 新增单测：缺 frontmatter、空 description、未闭合引号被拒；块标量 description 通过；`run` 层端到端断言坏技能在 spawn 任何 agent 前失败且不落盘。
+
 ## Unreleased — 停滞检测（stall detection）
 
 - **机械识别停滞家族，并在命中时只做软/硬两件事**（真实事故：b2a 19 轮、7 次人工加轮；b2c 8 轮，用户以「打地鼠」记录叫停；a3e2 11 轮、max_rounds 10→12。三次都是同一种失效模式：评审发现的是「下一条可达路径」，开发者只修被点名的那条，引擎对「同一根因家族跨轮存活」没有任何感知）。
