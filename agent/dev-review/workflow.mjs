@@ -2016,19 +2016,25 @@ function stallSignalForRound(state, round) {
 }
 
 function stallFamilyMemberLine(member) {
-  const status = member.open ? "未闭合" : "已闭合";
-  return `- ${member.id}（${member.severity}；首现 r${member.first_round}；最近判定 r${member.last_round}: ${member.last_verdict}；${status}）`;
+  const status = member.open ? "open" : "closed";
+  return `- ${member.id} · ${member.severity} · first r${member.first_round} · last r${member.last_round}: ${member.last_verdict} · ${status}`;
 }
 
 /**
  * Family-level acceptance criteria for the next developer round. The text is a
  * separate constant so removing it can never affect routing/observation.
+ *
+ * English-only on purpose: the role prompts draw the line at "instructions in
+ * English, human-readable content in the frozen plan's language"
+ * (prompts/developer.md), and the task packet around this text is English. A
+ * second, parallel Chinese copy would be a second source of truth for the same
+ * criteria — if the two ever drift, nobody can say which half the model read.
  */
-export const STALL_DIRECTIVE = `## 停滞家族补偿判据（引擎注入）
+export const STALL_DIRECTIVE = `## Stall-family acceptance criteria (engine-injected)
 
 {families}
 
-本轮按家族整体验收：给出根因不变量，逐一列出会违反它的边界，并对每条给出“已修 / 不可达 / 不在本批”的结论与证据；实现方式不限，但只修被点名的那条路径、其余沉默视为未完成。`;
+Accept this family as a whole: state the root-cause invariant, enumerate every boundary that would violate it, and give a verdict with evidence for each one — "fixed" / "unreachable" / "out of scope for this batch". How you implement it is your call, but fixing only the named path and staying silent on the rest counts as incomplete.`;
 
 /** Fill STALL_DIRECTIVE for the soft-fired families (primary cluster listed first). */
 export function renderStallDirective(families) {
@@ -2037,20 +2043,22 @@ export function renderStallDirective(families) {
     .slice()
     .sort((left, right) => right.members.length - left.members.length || compareStallIssueIds(left.key, right.key))
     .map((family) => [
-      `该文件族（family ${family.key}）在最近 ${family.span} 轮评审中产生 ${family.members.length} 条同源 finding，仍有 ${family.openMembers.length} 条未闭合：`,
+      `family ${family.key}: ${family.members.length} linked findings over the last ${family.span} review rounds, ${family.openMembers.length} still open`,
       ...family.memberDetails.map(stallFamilyMemberLine),
     ].join("\n"))
     .join("\n\n");
-  return STALL_DIRECTIVE.replace("{families}", blocks);
+  // Function replacer: injected text may contain `$&`-style sequences, which a
+  // string replacement would interpret as capture references.
+  return STALL_DIRECTIVE.replaceAll("{families}", () => blocks);
 }
 
 /**
  * Reviewer-side candidate confirmation. Uses review-round data only: the
  * reviewer formally declares `repeat_of` when confirming a candidate.
  */
-export const STALL_CANDIDATES = `## 未连接候选确认（引擎注入）
+export const STALL_CANDIDATES = `## Unlinked-candidate confirmation (engine-injected)
 
-以下 finding 与本家族未连接。请逐条确认或分离：确认为同源时，在你本轮的新 finding 上用 optional 字段 repeat_of: "{family}" 声明；确认不同源时，在 handoff_to_developer 中说明判断依据。
+The findings below are not linked to this family. Confirm or separate each of them: when you confirm common origin, declare the optional field repeat_of: "{family}" on your new finding; otherwise justify the separation in handoff_to_developer.
 
 {candidates}`;
 
@@ -2058,10 +2066,12 @@ export function renderStallCandidateSection(candidates) {
   if (typeof STALL_CANDIDATES !== "string" || !STALL_CANDIDATES) return "";
   const family = candidates[0]?.family || "";
   const lines = candidates.map((candidate) => {
-    const verdict = candidate.last_verdict === "new" ? "本轮新增" : `最近判定 r${candidate.last_round}: ${candidate.last_verdict}`;
-    return `- ${candidate.id}（${candidate.severity}，${candidate.location}；首现 r${candidate.first_round}，${verdict}）— ${candidate.requirement}`;
+    const verdict = candidate.last_verdict === "new"
+      ? "new this round"
+      : `last verdict r${candidate.last_round}: ${candidate.last_verdict}`;
+    return `- ${candidate.id} · ${candidate.severity} · ${candidate.location} · first r${candidate.first_round} · ${verdict} — ${candidate.requirement}`;
   });
-  return STALL_CANDIDATES.replace("{family}", family).replace("{candidates}", lines.join("\n"));
+  return STALL_CANDIDATES.replaceAll("{family}", () => family).replaceAll("{candidates}", () => lines.join("\n"));
 }
 
 /** Machine-generated family table attached to the human escalation. */

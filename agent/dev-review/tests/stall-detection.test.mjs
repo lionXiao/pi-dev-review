@@ -9,11 +9,15 @@ import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_STALL_GATE,
+  STALL_CANDIDATES,
+  STALL_DIRECTIVE,
   detectStallClusters,
   makeDeveloperTask,
   makeReviewerTask,
   normalizeReviewerReport,
   normalizeStallGate,
+  renderStallCandidateSection,
+  renderStallDirective,
   runCommand,
   stallIdentifiers,
   stallLinkScore,
@@ -521,8 +525,8 @@ test("zero injection: a non-firing round is byte-identical with the gate on or o
       `reviewer task r${round} must not change when detection is off`,
     );
   }
-  assert.ok(!makeDeveloperTask(enabled, {}, 2, null, null).includes("停滞家族补偿判据"));
-  assert.ok(!makeReviewerTask(enabled, {}, 2, "dev.md").includes("未连接候选确认"));
+  assert.ok(!makeDeveloperTask(enabled, {}, 2, null, null).includes("Stall-family acceptance criteria"));
+  assert.ok(!makeReviewerTask(enabled, {}, 2, "dev.md").includes("Unlinked-candidate confirmation"));
 });
 
 test("injection: soft fire adds the family directive, candidates add the confirm/separate section", () => {
@@ -531,28 +535,67 @@ test("injection: soft fire adds the family directive, candidates add the confirm
   const softState = taskState({ stall: soft.stall });
 
   const directiveTask = makeDeveloperTask(softState, {}, 5, null, null);
-  assert.ok(directiveTask.includes("停滞家族补偿判据"));
+  assert.ok(directiveTask.includes("Stall-family acceptance criteria"));
   assert.ok(directiveTask.includes("R1-003"));
-  assert.ok(directiveTask.includes("本轮按家族整体验收"));
+  assert.ok(directiveTask.includes("Accept this family as a whole"));
   // The signal belongs to the review that produced it, never to its own round.
-  assert.ok(!makeDeveloperTask(softState, {}, 4, null, null).includes("停滞家族补偿判据"));
+  assert.ok(!makeDeveloperTask(softState, {}, 4, null, null).includes("Stall-family acceptance criteria"));
 
   // A stale signal cannot leak through a disabled gate.
   const disabledState = taskState({
     stall: soft.stall,
     config: { testCommands: ["node --test"], stallGate: { ...DEFAULT_STALL_GATE, enabled: false } },
   });
-  assert.ok(!makeDeveloperTask(disabledState, {}, 5, null, null).includes("停滞家族补偿判据"));
-  assert.ok(!makeReviewerTask(disabledState, {}, 5, "dev.md").includes("未连接候选确认"));
+  assert.ok(!makeDeveloperTask(disabledState, {}, 5, null, null).includes("Stall-family acceptance criteria"));
+  assert.ok(!makeReviewerTask(disabledState, {}, 5, "dev.md").includes("Unlinked-candidate confirmation"));
 
   const candidates = stallFromFixture("stalled-family-exit-gate.json", 16);
   assert.ok(candidates.detection.candidates.some((candidate) => candidate.id === "R16-001"));
   const candidateState = taskState({ stall: candidates.stall });
   const reviewerTask = makeReviewerTask(candidateState, {}, 17, "handoffs/developer-r17.md");
-  assert.ok(reviewerTask.includes("未连接候选确认"));
+  assert.ok(reviewerTask.includes("Unlinked-candidate confirmation"));
   assert.ok(reviewerTask.includes("R16-001"));
   assert.ok(reviewerTask.includes("repeat_of"));
-  assert.ok(!makeReviewerTask(candidateState, {}, 16, "dev.md").includes("未连接候选确认"));
+  assert.ok(!makeReviewerTask(candidateState, {}, 16, "dev.md").includes("Unlinked-candidate confirmation"));
+});
+
+test("injection: both compensation texts are English-only and fully substituted", () => {
+  const soft = stallFromFixture("stalled-family-reminder-errors.json", 4);
+  const directiveTask = makeDeveloperTask(taskState({ stall: soft.stall }), {}, 5, null, null);
+  assert.ok(directiveTask.includes("Accept this family as a whole"), "criteria present");
+  assert.ok(directiveTask.includes("still open"), "family summary");
+  assert.ok(!directiveTask.includes("{families}"), "family placeholder must be substituted everywhere");
+
+  const candidates = stallFromFixture("stalled-family-exit-gate.json", 16);
+  const reviewerTask = makeReviewerTask(taskState({ stall: candidates.stall }), {}, 17, "handoffs/developer-r17.md");
+  assert.ok(reviewerTask.includes("Confirm or separate each of them"), "criteria present");
+  assert.equal(reviewerTask.match(/repeat_of/g).length, 1, "declared exactly once");
+  assert.ok(!reviewerTask.includes("{family}"), "family placeholder must be substituted");
+  assert.ok(!reviewerTask.includes("{candidates}"));
+
+  // English-only: no parallel Chinese copy that could drift from the English
+  // wording. The family/candidate data lines are excluded on purpose — their
+  // requirement text follows the frozen plan's language, not this one.
+  assert.ok(!/[\u4e00-\u9fff]/.test(STALL_DIRECTIVE), "directive template must stay English-only");
+  assert.ok(!/[\u4e00-\u9fff]/.test(STALL_CANDIDATES), "candidate template must stay English-only");
+});
+
+test("injection: `$&`-style sequences in finding text survive substitution literally", () => {
+  const requirement = "价格 $& 与 $1 和 $' 必须原样保留";
+  const section = renderStallCandidateSection([
+    {
+      family: "R1-001",
+      id: "R9-001",
+      severity: "major",
+      location: "src/a.ts:1",
+      first_round: 9,
+      last_verdict: "new",
+      requirement,
+    },
+  ]);
+  assert.ok(section.includes(requirement), "requirement text must not be rewritten by the replacer");
+  assert.ok(!section.includes("{candidates}"));
+  assert.ok(renderStallDirective([{ key: "R1-001", span: 2, members: ["R1-001"], openMembers: ["R1-001"], memberDetails: [] }]).includes("still open"));
 });
 
 test("config off: stallGate.enabled=false yields zero triggers, zero clusters, zero candidates", () => {
@@ -772,10 +815,10 @@ test("engine: soft fire injects the developer directive and records the log/time
     assert.equal(result.state.status, "passed");
 
     const developerTask = (round) => tasks.find((entry) => entry.role === "developer" && entry.round === round).task;
-    assert.ok(!developerTask(1).includes("停滞家族补偿判据"));
-    assert.ok(!developerTask(2).includes("停滞家族补偿判据"));
-    assert.ok(!developerTask(3).includes("停滞家族补偿判据"));
-    assert.ok(developerTask(4).includes("停滞家族补偿判据"), "round 4 developer task must carry the family directive");
+    assert.ok(!developerTask(1).includes("Stall-family acceptance criteria"));
+    assert.ok(!developerTask(2).includes("Stall-family acceptance criteria"));
+    assert.ok(!developerTask(3).includes("Stall-family acceptance criteria"));
+    assert.ok(developerTask(4).includes("Stall-family acceptance criteria"), "round 4 developer task must carry the family directive");
     assert.ok(developerTask(4).includes("R1-001"));
 
     const logLines = (await readFile(join(result.paths.reports, "findings.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
