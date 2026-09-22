@@ -16,7 +16,7 @@ jobs:
         run: node --test agent/dev-review/tests/*.test.mjs
       - name: Syntax check (extension + engine)
         run: |
-          node --check agent/extensions/dev-review-loop/index.ts
+          node agent/dev-review/tools/check-extension-syntax.mjs agent/extensions/dev-review-loop/index.ts
           node --check agent/dev-review/workflow.mjs
           node --check agent/dev-review/discipline-router.mjs
           node --check agent/dev-review/discipline-runtime.mjs

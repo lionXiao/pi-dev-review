@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { extractJsonObject, extractReportObject, repairUnbalancedReport, runCommand } from "../workflow.mjs";
 
@@ -403,8 +404,29 @@ test("run: a failed round does not consume the review budget", async () => {
   }
 });
 
-test("run: a parseable report with a schema error is recovered into the escalation", async () => {
-  const wrongStatus = JSON.stringify(
+test("tools: the extension syntax check strips types and rejects broken TS", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const tool = join(here, "..", "tools", "check-extension-syntax.mjs");
+  const extension = join(here, "..", "..", "extensions", "dev-review-loop", "index.ts");
+  const status = (file) => {
+    try {
+      execFileSync(process.execPath, [tool, file], { stdio: "pipe" });
+      return 0;
+    } catch (error) {
+      return error.status ?? 1;
+    }
+  };
+  assert.equal(status(extension), 0, "the shipped extension must pass its own syntax check");
+  const broken = join(tmpdir(), `pi-dev-review-broken-${process.pid}.ts`);
+  writeFileSync(broken, "type T = { a: string };\nexport const x: T = { a:  } ;\n", "utf8");
+  try {
+    assert.notEqual(status(broken), 0, "broken TypeScript must fail the check");
+  } finally {
+    rmSync(broken, { force: true });
+  }
+});
+
+test("run: a parseable report with a schema error is recovered into the escalation", async () => {  const wrongStatus = JSON.stringify(
     { status: "fixed", summary: "r4 docs fixes already applied on disk", blockers: [] },
     null,
     2,
