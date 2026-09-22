@@ -1,5 +1,7 @@
 # pi-dev-review
 
+**中文 | [English](README.en.md)**
+
 [![CI](https://github.com/lionXiao/pi-dev-review/actions/workflows/ci.yml/badge.svg)](https://github.com/lionXiao/pi-dev-review/actions/workflows/ci.yml)
 
 一个人工审签、双 Agent 自动执行的**开发-评审工作流**（Pi 扩展）：冻结计划 → developer 实现 → reviewer 独立评审 → pass/blocked 循环。主 agent 是秘书不是施工队，决策权永远在人手里。
