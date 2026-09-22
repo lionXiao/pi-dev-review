@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 报告 JSON 括号修复（不掉轮次）
+
+真实事故（dieMoney b9 Siri 读取意图，2026-09-22）：开发者的最终报告连续两轮（r5 21:49、r6 21:54）都是「内容写完了、只差闭合符」。`resolved_issues` 的元素写完后漏掉元素 `}` 与数组 `]`，随后的 `tests / assumptions / risks / handoff_to_reviewer / blockers` 全被裹进最后一个元素里，而 agent 的 `stopReason` 是正常的 `stop`、输出只有 4394/7388 token——**不是截断，是模型漏写了两个字符**。引擎旧行为：JSON 解析失败 → `developer-protocol-or-execution-error` → 升级给人，两轮预算直接烧掉（`currentRound` 4→6，max 10）。
+
+- **新增模式感知的括号修复（默认开启）**：解析失败且失败原因是「容器未闭合」时，枚举候选拼点（报告字段名出现的位置），每个候选尝试插入缺失的闭合符，**只在唯一解**时接受——要求：能解析、所有出现的报告字段都留在顶层（没被裹进嵌套容器）、不产生重复顶层键。零个或多个候选一律照旧升级（不猜）。修复是**纯插入**：不改写、不删除任何字符，只加缺失的 `]`/`}`。
+- **边界：真正的截断不修**。若输出在容器中途就没了（后面再没有内容），分不清“漏括号”还是“被截断”，仍然交给人——只有 agent 明明继续往下写了才视为漏括号。
+- **可审计**：原样输出落 `handoffs/<role>-rNN.raw.txt`；审计记录写 `handoffs/<role>-rNN.repair.json`（插入位置、插入字符、拼点处未闭合的容器及其字段名）；timeline 追加一行 `report-repaired`；handoff 末尾附「## Report JSON auto-repaired」段说明引擎只补了哪个闭合符、原文与审计文件在哪。修补过的报告绝不会看起来像干净的。
+- **诊断文案修正**：「unterminated JSON object … may be truncated」改为列出**具体哪些容器没关**（类型 + 字段名 + 偏移）并说明可能是漏括号也可能是截断——旧文案把 b9 的漏括号误导成截断（`stopReason` 实际是 `stop`）。dev 与 reviewer 两条路径共用同一解析与修复逻辑；`DEV_REVIEW_REPORT_REPAIR=0` 关闭修复。
+- **测试**：新增 6 个用例——真实 r6 形状修复后字段齐全且验证**剥离插入字符 == 原文**（纯插入）、干净报告不被触碰、只在中途断掉的输出不修（并断言错误信息点名 `array for "resolved_issues"`）、重复顶层键的伪拼点被拒、`repair:false` 关开关、端到端（假 pi：坏报告 → 修复 → 进评审 → 最终 `passed`，并断言 sidecar / raw / timeline / handoff 四处留痕）。共 82 个测试。
+
 ## 0.12.0 — 2026-09-22
 
 ### 停滞检测（stall detection）

@@ -497,6 +497,58 @@ async function writeProtocolRawText(paths, role, round, finalText) {
   return filePath;
 }
 
+/**
+ * Audit trail for a repaired report: the verbatim output is kept next to a
+ * sidecar that records exactly which closers were re-inserted, and the timeline
+ * gets one line. A repaired report must never look like a clean one.
+ */
+async function recordReportRepair({ paths, projectRoot, role, round, repair, finalText }) {
+  const rawTextPath = await writeProtocolRawText(paths, role, round, finalText);
+  const sidecarPath = path.join(paths.handoffs, `${role}-r${String(round).padStart(2, "0")}.repair.json`);
+  await writeJson(sidecarPath, {
+    schemaVersion: SCHEMA_VERSION,
+    role,
+    round,
+    at: now(),
+    reason: "unbalanced-json-containers",
+    objectStart: repair.objectStart,
+    rawTextLength: repair.rawLength,
+    insertions: repair.insertions,
+    containers: repair.containers,
+    rawTextPath: rawTextPath ? relativeTo(projectRoot, rawTextPath) : null,
+  });
+  await appendTimeline(paths, timelineLine({
+    round,
+    event: "report-repaired",
+    status: role,
+    summary: `Agent report JSON was missing closing brackets (inserted ${repair.insertions.map((entry) => `\`${entry.text}\` before \`${entry.beforeKey}\``).join(", ")}); content unchanged`,
+    artifact: relativeTo(projectRoot, sidecarPath),
+  }));
+  return {
+    ...repair,
+    rawTextPath: rawTextPath ? relativeTo(projectRoot, rawTextPath) : null,
+    sidecarPath: relativeTo(projectRoot, sidecarPath),
+  };
+}
+
+/** Handoff footer that keeps a repaired report honest for later readers. */
+function reportRepairFooter({ role, repair }) {
+  const insertions = repair.insertions
+    .map((entry) => `\`${entry.text}\` before \`"${entry.beforeKey}"\` (offset ${entry.offset})`)
+    .join(", ");
+  return [
+    "",
+    "## Report JSON auto-repaired",
+    "",
+    `${role === "reviewer" ? "The reviewer" : "The developer"} ended its report without closing ${repair.containers.length} container(s), so the engine re-inserted ${insertions}. Nothing else was added, removed or rewritten — every field is verbatim.`,
+    "",
+    `- Open containers at the splice point: ${repair.containers.map(describeContainer).join(", ")}`,
+    `- Verbatim agent output: \`${repair.rawTextPath || "(not saved)"}\``,
+    `- Audit record: \`${repair.sidecarPath || "(none)"}\``,
+    "",
+  ].join("\n");
+}
+
 async function readJson(filePath) {
   let parsed;
   try {
@@ -1120,9 +1172,14 @@ function excerptAround(text, position, radius = 90) {
   return `…${text.slice(from, to).replace(/\s+/g, " ").trim()}…`;
 }
 
-function malformedJsonMessage(span, text) {
+function malformedJsonMessage(span, text, keys = []) {
   if (span.unterminated) {
-    return `Agent output contains an unterminated JSON object starting at offset ${span.start} (a '{' is never closed, so the response may be truncated). Near: ${excerptAround(text, span.start)}`;
+    const containers = openContainersAtEnd(text.slice(span.start), keys)
+      .map((container) => ({ ...container, start: container.start + span.start }));
+    const detail = containers.length
+      ? `${containers.length} container${containers.length === 1 ? "" : "s"} never closed — ${containers.slice(0, 3).map(describeContainer).join(", ")}`
+      : "a '{' is never closed";
+    return `Agent output contains an unterminated JSON object starting at offset ${span.start}: ${detail}. The last closing bracket was dropped, or the response was cut off before the object ended. Near: ${excerptAround(text, span.start)}`;
   }
   const detail = span.error?.message || "invalid JSON syntax";
   const match = /at position (\d+)/.exec(detail);
@@ -1130,50 +1187,18 @@ function malformedJsonMessage(span, text) {
   return `Agent returned malformed JSON: ${detail}. Re-emit exactly one well-formed JSON object (no prose, no '+' string concatenation, no trailing commas). Near: ${excerptAround(text, focus)}`;
 }
 
-function extractJsonObject(text) {
+function extractJsonObject(text, keys = []) {
   const parsed = [];
   const broken = [];
   for (let start = 0; start < text.length; start += 1) {
     if (text[start] !== "{") continue;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    let closedAt = -1;
-    for (let index = start; index < text.length; index += 1) {
-      const character = text[index];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (character === "\\") escaped = true;
-        else if (character === '"') inString = false;
-        continue;
-      }
-      if (character === '"') {
-        inString = true;
-        continue;
-      }
-      if (character === "{") depth += 1;
-      if (character === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          closedAt = index;
-          break;
-        }
-      }
-    }
-    if (closedAt < 0) {
-      broken.push({ start, end: text.length, source: text.slice(start), unterminated: true });
-      continue;
-    }
-    const source = text.slice(start, closedAt + 1);
-    try {
-      parsed.push({ start, end: closedAt + 1, source, value: JSON.parse(source) });
-    } catch (error) {
-      broken.push({ start, end: closedAt + 1, source, error });
-    }
+    const span = scanJsonObjectAt(text, start);
+    if (span.value !== undefined) parsed.push(span);
+    else broken.push(span);
   }
   const broadest = (spans) => spans.slice().sort((left, right) => right.source.length - left.source.length)[0];
   if (parsed.length === 0) {
-    if (broken.length) throw new Error(malformedJsonMessage(broadest(broken), text));
+    if (broken.length) throw new Error(malformedJsonMessage(broadest(broken), text, keys));
     throw new Error(`Agent did not return a JSON object. Final output excerpt: ${text.slice(0, 500)}`);
   }
   const best = broadest(parsed);
@@ -1184,8 +1209,242 @@ function extractJsonObject(text) {
   const enclosing = broken
     .filter((span) => span.start < best.start && span.end >= best.end)
     .sort((left, right) => left.source.length - right.source.length)[0];
-  if (enclosing) throw new Error(malformedJsonMessage(enclosing, text));
+  if (enclosing) throw new Error(malformedJsonMessage(enclosing, text, keys));
   return best.value;
+}
+
+/** One `{`-anchored span: either a parsed value or the reason it could not parse. */
+function scanJsonObjectAt(text, start) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let closedAt = -1;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        closedAt = index;
+        break;
+      }
+    }
+  }
+  if (closedAt < 0) return { start, end: text.length, source: text.slice(start), unterminated: true };
+  const source = text.slice(start, closedAt + 1);
+  try {
+    return { start, end: closedAt + 1, source, value: JSON.parse(source) };
+  } catch (error) {
+    return { start, end: closedAt + 1, source, error };
+  }
+}
+
+/**
+ * Top-level keys of each role's report, in the order the task packet declares
+ * them. Used by the structural diagnostics and the bracket repair; the report
+ * schema itself is enforced by the normalizers.
+ */
+const DEVELOPER_REPORT_KEYS = Object.freeze([
+  "status",
+  "summary",
+  "changed_files",
+  "requirements_covered",
+  "resolved_issues",
+  "tests",
+  "assumptions",
+  "risks",
+  "handoff_to_reviewer",
+  "blockers",
+]);
+const REVIEWER_REPORT_KEYS = Object.freeze([
+  "decision",
+  "summary",
+  "previous_issue_verdicts",
+  "new_findings",
+  "tests",
+  "spec_questions",
+  "handoff_to_developer",
+]);
+
+const CONTAINER_CLOSER = Object.freeze({ "{": "}", "[": "]" });
+const CONTAINER_KIND = Object.freeze({ "{": "object", "[": "array" });
+
+function describeContainer(container) {
+  const key = container.key ? `for "${container.key}" ` : "";
+  return `${CONTAINER_KIND[container.character]} ${key}opened at offset ${container.start}`;
+}
+
+/**
+ * String-aware container scan: which containers are still open at `limit`, and
+ * every member key of interest with the containers open around it. That second
+ * list is what tells a bracket repair where a missing closer belongs — right
+ * before the next key of the same object level.
+ */
+function scanReportStructure(source, keys = [], limit = source.length) {
+  const wanted = new Set(keys);
+  const stack = [];
+  const members = [];
+  const topLevel = [];
+  let pendingKey = null;
+  let literalStart = -1;
+  let literalEnd = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < limit; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') {
+        inString = false;
+        literalEnd = index;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      literalStart = index + 1;
+      literalEnd = -1;
+      continue;
+    }
+    if (character === ":") {
+      if (literalEnd >= 0 && !source.slice(literalEnd + 1, index).trim()) {
+        pendingKey = source.slice(literalStart, literalEnd);
+        if (stack.length === 1) topLevel.push(pendingKey);
+        if (wanted.has(pendingKey) && literalStart - 1 > 0) {
+          members.push({
+            key: pendingKey,
+            start: literalStart - 1,
+            stack: stack.map((container) => ({ ...container })),
+          });
+        }
+      }
+      continue;
+    }
+    if (character === "{" || character === "[") {
+      stack.push({ character, start: index, key: pendingKey });
+      pendingKey = null;
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      stack.pop();
+      continue;
+    }
+  }
+  return { stack, members, topLevel };
+}
+
+/** Containers left open at the end of `source` (outermost first). */
+function openContainersAtEnd(source, keys = []) {
+  return scanReportStructure(source, keys).stack;
+}
+
+/** The earliest `{` in `text` whose object never closed, or -1. */
+function unterminatedObjectStart(text) {
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== "{") continue;
+    if (scanJsonObjectAt(text, start).unterminated) return start;
+  }
+  return -1;
+}
+
+/** Bracket repair is on by default; DEV_REVIEW_REPORT_REPAIR=0 turns it off. */
+function reportRepairEnabled() {
+  return process.env.DEV_REVIEW_REPORT_REPAIR !== "0";
+}
+
+/**
+ * Schema-aware bracket repair for a report whose containers were left open.
+ *
+ * The failure this exists for: the agent writes a long report, drops a closing
+ * `]`/`}` and keeps emitting the remaining top-level fields, so they end up
+ * nested inside the last unfinished container. The content is all there — only
+ * the closers are missing. Repair happens only when it is unambiguous: exactly
+ * one splice point yields an object that parses *and* keeps every report key at
+ * the top level. Zero or several candidates means the agent's intent cannot be
+ * known, so the run escalates exactly as before.
+ */
+/**
+ * Reports whose containers were left open, and the splice that re-closes them.
+ * Exported for the protocol tests (no IO, no side effects).
+ */
+export function repairUnbalancedReport(source, keys) {
+  const { stack, members } = scanReportStructure(source, keys);
+  if (!stack.length) return { ok: false, reason: "balanced" };
+  const attempts = [];
+  const seen = new Set();
+  for (const member of members) {
+    if (member.stack.length < 2) continue; // only the outer object would be closed
+    const closers = member.stack.slice(1).reverse().map((container) => CONTAINER_CLOSER[container.character]).join("");
+    if (!closers) continue;
+    // The closers replace the comma that introduced this key, so they land
+    // between members instead of turning `,"key"` into `,}"key"`.
+    let insertAt = -1;
+    for (let index = member.start - 1; index >= 0; index -= 1) {
+      const character = source[index];
+      if (character === " " || character === "\n" || character === "\r" || character === "\t") continue;
+      if (character === ",") insertAt = index;
+      break;
+    }
+    if (insertAt < 0) continue;
+    const signature = `${insertAt}|${closers}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    let value;
+    try {
+      value = JSON.parse(`${source.slice(0, insertAt)}${closers}${source.slice(insertAt)}`);
+    } catch {
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    // A splice that lands in the middle of an element turns that element's keys
+    // into duplicate top-level keys (JSON tolerates the duplicates, the report
+    // schema does not), so rejecting duplicates rules those splices out.
+    const topLevel = scanReportStructure(`${source.slice(0, insertAt)}${closers}${source.slice(insertAt)}`, keys).topLevel;
+    const unique = new Set(topLevel);
+    if (unique.size !== topLevel.length) continue;
+    const mentioned = [...new Set(members.map((entry) => entry.key))];
+    if (!mentioned.every((key) => unique.has(key))) continue;
+    attempts.push({
+      value,
+      repair: {
+        insertions: [{ offset: insertAt, beforeKey: member.key, text: closers }],
+        containers: member.stack,
+      },
+    });
+  }
+  if (attempts.length === 1) return { ok: true, value: attempts[0].value, repair: attempts[0].repair };
+  return { ok: false, reason: attempts.length ? "ambiguous" : "none" };
+}
+
+/**
+ * Parse a role report, repairing a missing closing bracket when that repair is
+ * unambiguous. Returns `{ value, repair }`; `repair` is null for a clean parse.
+ */
+export function extractReportObject(text, { keys = [], repair = reportRepairEnabled() } = {}) {
+  try {
+    return { value: extractJsonObject(text, keys), repair: null };
+  } catch (error) {
+    if (!repair) throw error;
+    const start = unterminatedObjectStart(text);
+    if (start < 0) throw error;
+    const result = repairUnbalancedReport(text.slice(start), keys);
+    if (!result.ok) throw error;
+    return {
+      value: result.value,
+      repair: { ...result.repair, objectStart: start, rawLength: text.length },
+    };
+  }
 }
 
 function standalonePiInvocation() {
@@ -3158,6 +3417,7 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     let reviewerBefore;
     let reviewerUsage = null;
     let reviewerOutput = null;
+    let reviewerRepair = null;
     try {
       reviewerBefore = await repositoryFingerprint(projectRoot);
       reviewerOutput = await invokeAgent({
@@ -3175,7 +3435,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       if (reviewerBefore !== reviewerAfter) {
         throw new Error("Reviewer changed the repository. Reviewers are read-only; inspect and revert/unblock this manually.");
       }
-      review = normalizeReviewerReport(extractJsonObject(reviewerOutput.finalText), round, state.openIssues);
+      const parsedReviewer = extractReportObject(reviewerOutput.finalText, { keys: REVIEWER_REPORT_KEYS });
+      review = normalizeReviewerReport(parsedReviewer.value, round, state.openIssues);
+      reviewerRepair = parsedReviewer.repair;
     } catch (error) {
       const rawTextPath = await writeProtocolRawText(paths, "reviewer", round, reviewerOutput?.finalText || error?.agentFailure?.partialText);
       await escalate("reviewer-protocol-or-execution-error", {
@@ -3186,6 +3448,17 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     }
 
     const nextOpenIssues = applyReviewReport(state, review, round);
+    // Recorded before the handoff files so the timeline reads chronologically.
+    if (reviewerRepair) {
+      reviewerRepair = await recordReportRepair({
+        paths,
+        projectRoot,
+        role: "reviewer",
+        round,
+        repair: reviewerRepair,
+        finalText: reviewerOutput.finalText,
+      });
+    }
     if (review.decision === "pass" && nextOpenIssues.length > 0) {
       await escalate("invalid-review-pass", {
         summary: "Reviewer returned pass while unresolved issues remained. This is a protocol violation and needs human inspection.",
@@ -3210,14 +3483,17 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       openIssues: state.openIssues,
     });
     await writeJson(reviewerJsonPath, review);
-    await writeText(reviewerMarkdownPath, reviewerMarkdownContent);
+    const reviewerHandoffContent = reviewerRepair
+      ? `${reviewerMarkdownContent}\n${reportRepairFooter({ role: "reviewer", repair: reviewerRepair })}\n`
+      : reviewerMarkdownContent;
+    await writeText(reviewerMarkdownPath, reviewerHandoffContent);
     await emitReport(onReport, notify, {
       role: "reviewer",
       round,
       status: review.decision,
       summary: review.summary,
       artifactPath: relativeTo(projectRoot, reviewerMarkdownPath),
-      markdown: reviewerMarkdownContent,
+      markdown: reviewerHandoffContent,
     });
     await appendTimeline(paths, timelineLine({
       round,
@@ -3356,6 +3632,8 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     const humanDecisionPath = state.pendingHumanDecisionPath;
     let developer;
     let developerUsage = null;
+    let developerRepair = null;
+    let developerValue = null;
     let developerOutput = null;
     try {
       developerOutput = await invokeAgent({
@@ -3369,7 +3647,10 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         onStats,
       });
       developerUsage = developerOutput.usage?.line || null;
-      developer = normalizeDeveloperReport(extractJsonObject(developerOutput.finalText));
+      const parsedDeveloper = extractReportObject(developerOutput.finalText, { keys: DEVELOPER_REPORT_KEYS });
+      developerValue = parsedDeveloper.value;
+      developer = normalizeDeveloperReport(parsedDeveloper.value);
+      developerRepair = parsedDeveloper.repair;
     } catch (error) {
       state.currentRound = round;
       // Surface the developer's actual report/questions in the escalation when the
@@ -3377,10 +3658,12 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       const finalText = typeof developerOutput?.finalText === "string" && developerOutput.finalText
         ? developerOutput.finalText
         : (typeof error?.agentFailure?.partialText === "string" ? error.agentFailure.partialText : "");
-      let rawReport = null;
-      try {
-        rawReport = extractJsonObject(finalText);
-      } catch {}
+      let rawReport = developerValue;
+      if (!rawReport) {
+        try {
+          rawReport = extractJsonObject(finalText, DEVELOPER_REPORT_KEYS);
+        } catch {}
+      }
       const devSummary = rawReport && typeof rawReport.summary === "string" ? rawReport.summary : "";
       const firstBlocker = Array.isArray(rawReport?.blockers) && rawReport.blockers.length
         ? String(rawReport.blockers[0])
@@ -3401,6 +3684,17 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
 
     const developerJsonPath = path.join(paths.handoffs, `developer-r${String(round).padStart(2, "0")}.json`);
     const developerMarkdownPath = path.join(paths.handoffs, `developer-r${String(round).padStart(2, "0")}.md`);
+    // Recorded before the handoff files so the timeline reads chronologically.
+    if (developerRepair) {
+      developerRepair = await recordReportRepair({
+        paths,
+        projectRoot,
+        role: "developer",
+        round,
+        repair: developerRepair,
+        finalText: developerOutput.finalText,
+      });
+    }
     const developerMarkdownContent = developerMarkdown({
       round,
       report: developer,
@@ -3409,15 +3703,18 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
       previousReviewPath,
       humanDecisionPath,
     });
+    const developerHandoffContent = developerRepair
+      ? `${developerMarkdownContent}\n${reportRepairFooter({ role: "developer", repair: developerRepair })}\n`
+      : developerMarkdownContent;
     await writeJson(developerJsonPath, developer);
-    await writeText(developerMarkdownPath, developerMarkdownContent);
+    await writeText(developerMarkdownPath, developerHandoffContent);
     await emitReport(onReport, notify, {
       role: "developer",
       round,
       status: developer.status,
       summary: developer.summary,
       artifactPath: relativeTo(projectRoot, developerMarkdownPath),
-      markdown: developerMarkdownContent,
+      markdown: developerHandoffContent,
     });
     await appendTimeline(paths, timelineLine({
       round,

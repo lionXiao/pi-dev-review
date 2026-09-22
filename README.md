@@ -266,4 +266,5 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 - 多工作流：串行为主；真要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。
 - **外部启动的轮询间隔**：默认 10s，`DEV_REVIEW_POLL_MS`（毫秒）可调。
 - **停滞检测的运行期行为**：`reports/findings.jsonl` 可删，等于清空跨轮家族历史（不回滚 `openIssues`，只是不再有家族感知）；`stallGate` 随实例冻结，改阈值需要新实例；`enabled:false` 只关判定层，`findings.jsonl` 仍写。
+- **报告 JSON 括号修复（默认开）**：子 agent 写完整份报告却漏掉 `]`/`}` 时（典型：`resolved_issues` 元素写完忘了关数组，后续顶层字段被裹进元素里，`stopReason` 仍然是正常的 `stop`），解析层会尝试**唯一解**的括号补齐——只在能解析、所有报告字段都在顶层、且不产生重复顶层键时采用，否则照旧升级给人；修补是原地插字符，原文存 `*.raw.txt`、审计写 `*.repair.json`、timeline 记一行 `report-repaired`、handoff 末尾附说明，`DEV_REVIEW_REPORT_REPAIR=0` 可关。输出真的在容器中途断掉时不修（分不清漏括号还是截断）。
 - 完整的注意事项清单（含纪律注入、审计文件、隔离边界）见 `docs/known-issues.md`，本节的条目是它的常用子集。

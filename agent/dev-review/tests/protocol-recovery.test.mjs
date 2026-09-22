@@ -6,7 +6,45 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { extractJsonObject, runCommand } from "../workflow.mjs";
+import { extractJsonObject, extractReportObject, repairUnbalancedReport, runCommand } from "../workflow.mjs";
+
+/** Top-level keys of the developer report, in task-packet order. */
+const DEVELOPER_KEYS = [
+  "status",
+  "summary",
+  "changed_files",
+  "requirements_covered",
+  "resolved_issues",
+  "tests",
+  "assumptions",
+  "risks",
+  "handoff_to_reviewer",
+  "blockers",
+];
+
+// The shape that stopped the b9 workflow twice in a row (r5 21:49, r6 21:54): the
+// developer closed the resolved_issues element but dropped its '}' together with
+// the array's ']', then kept writing top-level fields — so tests/assumptions/…
+// landed inside the array. Every character of the report is present; only the two
+// closers are missing (stopReason "stop", output far below any limit).
+const UNCLOSED_ARRAY_REPORT = `All gates pass for round 6. Here is the complete final report:
+
+{"status":"done","summary":"round 6 复验并收尾 R4-001","changed_files":["src/a.swift"],"requirements_covered":["E6"],"resolved_issues":[{"id":"R4-001","status":"fixed","summary":"结构校验","files":["src/a.swift"],"verification":["testA 通过"],"tests":[{"command":"npm test","status":"passed","summary":"8 通过"}],"assumptions":[],"risks":[],"handoff_to_reviewer":"复验 E6","blockers":[]}`;
+
+const EXPECTED_REPORT = {
+  status: "done",
+  summary: "round 6 复验并收尾 R4-001",
+  changed_files: ["src/a.swift"],
+  requirements_covered: ["E6"],
+  resolved_issues: [
+    { id: "R4-001", status: "fixed", summary: "结构校验", files: ["src/a.swift"], verification: ["testA 通过"] },
+  ],
+  tests: [{ command: "npm test", status: "passed", summary: "8 通过" }],
+  assumptions: [],
+  risks: [],
+  handoff_to_reviewer: "复验 E6",
+  blockers: [],
+};
 
 // The exact shape that stopped the b3 workflow: a complete-looking developer report
 // whose tests[1].command uses Python-style '+' concatenation. The outer object and
@@ -51,12 +89,67 @@ test("extractJsonObject: truncated outer object is reported as truncation, not a
   assert.throws(() => extractJsonObject(truncated), /unterminated JSON object/);
 });
 
+test("extractReportObject: an unclosed array is repaired when the splice is unambiguous", () => {
+  const { value, repair } = extractReportObject(UNCLOSED_ARRAY_REPORT, { keys: DEVELOPER_KEYS });
+  assert.deepEqual(value, EXPECTED_REPORT);
+  const [insertion] = repair.insertions;
+  assert.equal(insertion.text, "}]");
+  assert.equal(insertion.beforeKey, "tests");
+  // Insert-only proof: removing exactly what was inserted reproduces the raw output.
+  const objectStart = repair.objectStart;
+  const absolute = objectStart + insertion.offset;
+  const rebuilt = `${UNCLOSED_ARRAY_REPORT.slice(0, absolute)}${insertion.text}${UNCLOSED_ARRAY_REPORT.slice(absolute)}`;
+  assert.equal(rebuilt.slice(0, absolute) + rebuilt.slice(absolute + insertion.text.length), UNCLOSED_ARRAY_REPORT);
+  assert.deepEqual(JSON.parse(rebuilt.slice(objectStart)), EXPECTED_REPORT);
+  // Provenance records what was open when the agent stopped closing things.
+  assert.equal(repair.containers.length, 3);
+  assert.equal(repair.containers.find((container) => container.character === "[")?.key, "resolved_issues");
+  assert.equal(repair.rawLength, UNCLOSED_ARRAY_REPORT.length);
+});
+
+test("extractReportObject: a clean report is returned untouched and unflagged", () => {
+  const { value, repair } = extractReportObject(JSON.stringify(EXPECTED_REPORT), { keys: DEVELOPER_KEYS });
+  assert.deepEqual(value, EXPECTED_REPORT);
+  assert.equal(repair, null);
+});
+
+test("extractReportObject: output that merely stops is not repaired", () => {
+  // Ends inside the array: nothing follows the missing bracket, so the engine
+  // cannot tell a dropped bracket from a truncated response — escalate instead.
+  const truncated = `{"status":"done","summary":"x","resolved_issues":[{"id":"R1-001"}`;
+  assert.throws(() => extractReportObject(truncated, { keys: DEVELOPER_KEYS }), /unterminated JSON object/);
+  try {
+    extractReportObject(truncated, { keys: DEVELOPER_KEYS });
+    assert.fail("expected the run to escalate");
+  } catch (error) {
+    assert.match(error.message, /never closed/);
+    assert.match(error.message, /array for "resolved_issues"/);
+  }
+});
+
+test("extractReportObject: bracket repair can be switched off", () => {
+  assert.throws(
+    () => extractReportObject(UNCLOSED_ARRAY_REPORT, { keys: DEVELOPER_KEYS, repair: false }),
+    /unterminated JSON object/,
+  );
+});
+
+test("repairUnbalancedReport: a splice that would duplicate a top-level key is refused", () => {
+  // Closing before the inner `b` parses, but it turns the element key into a
+  // second top-level `b` — JSON tolerates duplicates, the report schema does not.
+  const result = repairUnbalancedReport(`{"b":[{"b":1},"b":2}`, ["b"]);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "none");
+});
+
 async function readyFixture() {
   const tempRoot = await mkdtemp(join(tmpdir(), "dev-review-protocol-"));
   // git reports the realpath (/private/var/... on macOS), so the fixture state
   // must use the same root or relativeTo() climbs out of the project.
   const root = realpathSync(tempRoot);
   execFileSync("git", ["init", "-q"], { cwd: root });
+  // The engine fingerprints the worktree with `git diff HEAD`, which needs a commit.
+  execFileSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: root });
   const artifact = join(root, ".ai-dev-review", "demo--abc12345");
   await mkdir(join(artifact, "inputs"), { recursive: true });
   await writeFile(join(artifact, "inputs", "plan-v1.md"), "# plan\n", "utf8");
@@ -130,6 +223,52 @@ test("run: malformed developer JSON blocks with the syntax error plus a raw-text
     assert.equal(await readFile(rawPath, "utf8"), MALFORMED_REPORT);
     const escalation = await readFile(join(root, result.state.blocked.escalationPath), "utf8");
     assert.match(escalation, /Raw agent output \(verbatim\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run: a report with a dropped closing bracket keeps the round instead of blocking", async () => {
+  const root = await readyFixture();
+  try {
+    const PASS_REVIEW = JSON.stringify({
+      decision: "pass",
+      summary: "独立复核通过",
+      previous_issue_verdicts: [],
+      new_findings: [],
+      tests: [],
+      spec_questions: [],
+      handoff_to_developer: "none",
+    });
+    const result = await runCommand({
+      args: "run",
+      cwd: root,
+      notify: () => {},
+      invokeAgent: async ({ role }) => ({
+        finalText: role === "developer" ? UNCLOSED_ARRAY_REPORT : PASS_REVIEW,
+        usage: null,
+      }),
+    });
+    assert.equal(result.state.status, "passed", "the round must survive the repair");
+
+    const handoffs = join(root, ".ai-dev-review", "demo--abc12345", "handoffs");
+    const repairedReport = JSON.parse(await readFile(join(handoffs, "developer-r01.json"), "utf8"));
+    assert.equal(repairedReport.status, "done");
+    assert.equal(repairedReport.tests.length, 1);
+
+    const sidecar = JSON.parse(await readFile(join(handoffs, "developer-r01.repair.json"), "utf8"));
+    assert.equal(sidecar.reason, "unbalanced-json-containers");
+    assert.deepEqual(sidecar.insertions.map((entry) => [entry.text, entry.beforeKey]), [["}]", "tests"]]);
+    assert.match(sidecar.rawTextPath, /developer-r01\.raw\.txt$/);
+    assert.equal(await readFile(join(root, sidecar.rawTextPath), "utf8"), UNCLOSED_ARRAY_REPORT);
+
+    const handoff = await readFile(join(handoffs, "developer-r01.md"), "utf8");
+    assert.match(handoff, /## Report JSON auto-repaired/);
+    assert.match(handoff, /content unchanged|verbatim/);
+
+    const timeline = await readFile(join(root, ".ai-dev-review", "demo--abc12345", "reports", "timeline.md"), "utf8");
+    assert.match(timeline, /report-repaired/);
+    assert.match(timeline, /inserted `}\]` before `tests`/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
