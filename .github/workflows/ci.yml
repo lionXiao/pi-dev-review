@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Unit tests
+        run: node --test agent/dev-review/tests/*.test.mjs
+      - name: Syntax check (extension + engine)
+        run: |
+          node --check agent/extensions/dev-review-loop/index.ts
+          node --check agent/dev-review/workflow.mjs
+          node --check agent/dev-review/discipline-router.mjs
+          node --check agent/dev-review/discipline-runtime.mjs
+      - name: Install script check
+        run: bash -n install.sh
