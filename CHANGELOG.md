@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — 报告被拒重试 + 失败不吃轮次预算
+
+接上一节：括号修复只能救“漏闭合符”，救不了别的坏报告（真实事故 b3 的 `+` 拼接、b9 的 `status: "fixed"`）。而且失败一轮就真的少一轮预算（b9 的 r5/r6 两次协议失败占了 10 轮里的 2 轮）。
+
+- **新增报告重试（`--protocol-retries`，默认 1）**：最终消息解析不了或过不了 schema 时，引擎**在同一 session** 里再试一次——把失败原因（解析错误/校验错误原文，截断到 400 字符）回贴给 agent，并注上一段引擎指令：**只重出报告 JSON，不得重做工作，字段保持短**。修得出来就不算失败。`0` 关闭。与 `--agent-retries` 分工明确：后者只治子进程/流层的瞬时故障，前者治“报告不可用”。
+  - 可审计：每次被拒的原文存 `handoffs/<role>-rNN.raw.txt`（第 2、3 次尝试为 `-attemptN`），timeline 追加一行 `report-retry`（含原因与原文路径）。
+  - 不重试的情况：reviewer 改变了工作树（不是报告问题，直接升级）；执行故障（走 agent retries）。
+- **失败轮次不再吃 `max-rounds` 预算**：非成功产出的轮次记入 `state.reportFailures`（含 role、轮次、原因），有效预算 = `maxReviewRounds + 失败数`。三处检查（预检、循环条件、max-rounds 升级）全部改走 `roundBudget()`；`Round:` 状态行显示 `3/11 (1 report failure(s) excluded)`，多一行 `Report failures:`，max-rounds 升级摘要也会注明排除了几轮。已升级的实例不受影响：老 state 没有该字段时失败数为 0。
+- **测试**（新增 3 个，共 85）：被拒报告在同 session 重试并保留本轮（断言两次调用、第 2 次任务里带失败原因与「must NOT be redone」、被拒原文落盘、timeline 有 `report-retry`、`currentRound` 仍为 1）；`--protocol-retries 0` 时首次被拒即升级；`maxReviewRounds: 1` 下失败一轮后仍能跑第二、并最终 `passed`（断言 `reportFailures` 与 timeline 的 `report-failure`/预算延长提示）。`--protocol-retries` 可从 CLI / `defaults.json` / `local.json` / `dev_review_start({ protocol_retries })` 设定；`defaults.json` 新增 `protocolRetries: 1`。
+
 ## Unreleased — 报告 JSON 括号修复（不掉轮次）
 
 真实事故（dieMoney b9 Siri 读取意图，2026-09-22）：开发者的最终报告连续两轮（r5 21:49、r6 21:54）都是「内容写完了、只差闭合符」。`resolved_issues` 的元素写完后漏掉元素 `}` 与数组 `]`，随后的 `tests / assumptions / risks / handoff_to_reviewer / blockers` 全被裹进最后一个元素里，而 agent 的 `stopReason` 是正常的 `stop`、输出只有 4394/7388 token——**不是截断，是模型漏写了两个字符**。引擎旧行为：JSON 解析失败 → `developer-protocol-or-execution-error` → 升级给人，两轮预算直接烧掉（`currentRound` 4→6，max 10）。

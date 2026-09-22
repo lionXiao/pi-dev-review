@@ -22,6 +22,10 @@ const DEFAULT_ARTIFACT_DIR = ".ai-dev-review";
 const DEFAULT_MAX_ROUNDS = 10;
 const DEFAULT_DEVELOPER_RESET_AFTER_ROUNDS = 4;
 const DEFAULT_AGENT_RETRIES = 2;
+// Report protocol failures (unparseable or schema-invalid final message) get one
+// more attempt in the same session: the work is already done, only the report
+// was unusable. Distinct from agent retries, which cover execution faults.
+const DEFAULT_PROTOCOL_RETRIES = 1;
 // Developer-only skills injected with pi's repeatable `--skill <path>` flag.
 // Roles run with `--no-skills`, so this is an explicit channel (caller decides),
 // never local skill discovery.
@@ -53,6 +57,7 @@ Options for init/configure:
   --max-rounds <n>                  Developer+review cycles before human escalation (default: ${DEFAULT_MAX_ROUNDS})
   --developer-reset-after <n>       Rotate the developer's private Pi session after n rounds (default: ${DEFAULT_DEVELOPER_RESET_AFTER_ROUNDS})
   --agent-retries <n>               Automatic retries per agent run on transient execution failures (default: ${DEFAULT_AGENT_RETRIES})
+  --protocol-retries <n>            Automatic retries when the agent's final report cannot be parsed or validated (default: ${DEFAULT_PROTOCOL_RETRIES})
   --dev-skill <path>                Extra Pi skill for the developer only; repeatable, file or directory
   --test <command>                  Required test command; repeatable
   --developer-thinking <level>      Pi thinking level for the developer
@@ -209,6 +214,7 @@ function parseOptions(tokens) {
     "--max-rounds",
     "--developer-reset-after",
     "--agent-retries",
+    "--protocol-retries",
     "--dev-skill",
     "--test",
     "--choose",
@@ -240,6 +246,7 @@ function parseOptions(tokens) {
       else if (token === "--max-rounds") options.maxRounds = numberOption(value, token);
       else if (token === "--developer-reset-after") options.developerResetAfterRounds = numberOption(value, token);
       else if (token === "--agent-retries") options.agentRetries = numberOption(value, token, 0);
+      else if (token === "--protocol-retries") options.protocolRetries = numberOption(value, token, 0);
       else if (token === "--developer-thinking") options.developerThinking = value;
       else if (token === "--reviewer-thinking") options.reviewerThinking = value;
       else if (token === "--choose") options.choose = value;
@@ -490,11 +497,90 @@ async function writeText(filePath, value) {
 
 // Preserve the child agent's final message verbatim when a protocol error stops the
 // loop, so the human can see what it actually said even when the JSON cannot parse.
-async function writeProtocolRawText(paths, role, round, finalText) {
+// Retried attempts get their own file; without the suffix a second failure in the
+// same round would overwrite the evidence of the first.
+async function writeProtocolRawText(paths, role, round, finalText, attempt = 0) {
   if (typeof finalText !== "string" || !finalText) return null;
-  const filePath = path.join(paths.handoffs, `${role}-r${String(round).padStart(2, "0")}.raw.txt`);
+  const suffix = attempt > 0 ? `-attempt${attempt + 1}` : "";
+  const filePath = path.join(paths.handoffs, `${role}-r${String(round).padStart(2, "0")}${suffix}.raw.txt`);
   await writeText(filePath, finalText);
   return filePath;
+}
+
+/** How many extra attempts a rejected report gets (0 disables the retry). */
+function protocolRetryLimit(state) {
+  const configured = Number(state.config?.protocolRetries);
+  return Number.isFinite(configured) && configured >= 0
+    ? Math.floor(configured)
+    : DEFAULT_PROTOCOL_RETRIES;
+}
+
+/**
+ * Feedback appended to the task for a report retry. The agent keeps the same
+ * session, so it can see what it sent; the directive only tells it what was
+ * rejected and that the work itself must not be redone.
+ */
+function protocolRetryDirective({ role, attempt, limit, error }) {
+  const report = role === "reviewer" ? "review JSON object" : "developer JSON object";
+  const reason = truncateText(String(error?.message || "the report could not be accepted"), 400);
+  return [
+    `## Report retry (attempt ${attempt + 1} of ${limit + 1} — engine-injected)`,
+    "",
+    `Your previous final message was rejected: ${reason}`,
+    "",
+    `The repository work itself is not in question and must NOT be redone. Re-emit ONLY the ${report} as your entire final message: every field present, JSON keys exactly as specified, no prose before or after, no Markdown fence. If a free-text field is what broke the syntax, keep that field shorter instead of dropping it.`,
+  ].join("\n");
+}
+
+/** Report failures that were discarded instead of consuming a review round. */
+function reportFailureCount(state) {
+  return Array.isArray(state.reportFailures) ? state.reportFailures.length : 0;
+}
+
+/**
+ * Review rounds the instance may still use: the configured maximum plus the
+ * rounds a report/execution failure consumed without producing a verdict. A
+ * malformed report is not progress, so it must not eat the human's budget.
+ */
+function roundBudget(state) {
+  return (Number(state.config?.maxReviewRounds) || 0) + reportFailureCount(state);
+}
+
+function budgetNote(state) {
+  const failures = reportFailureCount(state);
+  if (!failures) return "";
+  return ` ${failures} round(s) consumed by report/execution failures were excluded from that limit.`;
+}
+
+/** Timeline + notify for one rejected report that is retried in the same session. */
+async function recordReportRetry({ paths, projectRoot, role, round, attempt, error, rawTextPath }) {
+  await appendTimeline(paths, timelineLine({
+    round,
+    event: "report-retry",
+    status: role,
+    summary: `Final report rejected (attempt ${attempt}): ${truncateText(String(error?.message || "unknown"), 220)} — asking the same session for a corrected report`,
+    artifact: rawTextPath ? relativeTo(projectRoot, rawTextPath) : null,
+  }));
+}
+
+/**
+ * Bookkeeping for a round that ended in a report/execution failure: the round
+ * produced no verdict, so it must not consume the human's review budget.
+ */
+async function recordReportFailure({ state, paths, projectRoot, role, round, error }) {
+  state.reportFailures = Array.isArray(state.reportFailures) ? state.reportFailures : [];
+  state.reportFailures.push({
+    at: now(),
+    round,
+    role,
+    reason: truncateText(String(error?.message || "unknown"), 400),
+  });
+  await appendTimeline(paths, timelineLine({
+    round,
+    event: "report-failure",
+    status: role,
+    summary: `${truncateText(String(error?.message || "unknown"), 220)} — round budget extended (${reportFailureCount(state)} excluded so far)`,
+  }));
 }
 
 /**
@@ -2857,7 +2943,7 @@ function stateStatus(state, paths, usageLines = []) {
     `Status: ${state.status}${state.phase ? ` (${state.phase})` : ""}`,
     `Plan snapshot: ${relativeTo(state.projectRoot, path.resolve(state.projectRoot, state.plan.snapshotPath))}`,
     `Base commit: ${state.base.head}`,
-    `Round: ${state.currentRound}/${state.config.maxReviewRounds}`,
+    `Round: ${state.currentRound}/${roundBudget(state)}${reportFailureCount(state) ? ` (${reportFailureCount(state)} report failure(s) excluded)` : ""}`,
     `Developer model: ${state.config.developerModel}${state.config.developerThinking ? ` · thinking ${state.config.developerThinking}` : ""}`,
     `Reviewer model: ${state.config.reviewerModel}${state.config.reviewerThinking ? ` · thinking ${state.config.reviewerThinking}` : ""}`,
     ...(state.config.devSkills?.length
@@ -2866,6 +2952,7 @@ function stateStatus(state, paths, usageLines = []) {
     `Active role: ${state.phase === "review" ? `review r${state.currentRound}` : state.phase === "development" ? `dev r${state.currentRound + 1}` : state.phase || "-"}`,
     `Open issues: ${state.openIssues.length ? state.openIssues.map((issue) => issue.id).join(", ") : "none"}`,
     `Artifacts: ${relativeTo(state.projectRoot, paths.root)}`,
+    ...(reportFailureCount(state) ? [`Report failures: ${reportFailureCount(state)} (round budget extended to ${roundBudget(state)})`] : []),
     `Timeline: ${relativeTo(state.projectRoot, timelineFilePath(paths))}`,
   ];
   for (const usageLine of usageLines) lines.push(usageLine);
@@ -3021,6 +3108,10 @@ function mergeConfig(state, options, { requireModels = false, defaults = {} } = 
       ?? current.agentRetries
       ?? defaults.agentRetries
       ?? DEFAULT_AGENT_RETRIES,
+    protocolRetries: options.protocolRetries
+      ?? current.protocolRetries
+      ?? defaults.protocolRetries
+      ?? DEFAULT_PROTOCOL_RETRIES,
     devSkills: options.devSkills ?? current.devSkills ?? defaults.devSkills ?? DEFAULT_DEV_SKILLS,
     testCommands: options.tests.length ? options.tests : (current.testCommands ?? defaults.testCommands ?? []),
     developerThinking: options.developerThinking ?? current.developerThinking ?? defaults.developerThinking ?? null,
@@ -3263,6 +3354,7 @@ async function resolveWorkflow(cwd, positionals, options) {
   }
   if (options.maxRounds) state.config.maxReviewRounds = options.maxRounds;
   if (options.agentRetries !== undefined) state.config.agentRetries = options.agentRetries;
+  if (options.protocolRetries !== undefined) state.config.protocolRetries = options.protocolRetries;
   state.pendingHumanDecisionPath = relativeTo(projectRoot, destination);
   state.status = "ready";
   state.phase = "idle";
@@ -3418,30 +3510,71 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     let reviewerUsage = null;
     let reviewerOutput = null;
     let reviewerRepair = null;
-    try {
-      reviewerBefore = await repositoryFingerprint(projectRoot);
-      reviewerOutput = await invokeAgent({
-        role: "reviewer",
-        state,
-        paths,
-        round,
-        task: makeReviewerTask(state, paths, round, relativeTo(projectRoot, developerMarkdownPath)),
-        piInvocation,
-        notify,
-        onStats,
-      });
-      reviewerUsage = reviewerOutput.usage?.line || null;
-      const reviewerAfter = await repositoryFingerprint(projectRoot);
-      if (reviewerBefore !== reviewerAfter) {
-        throw new Error("Reviewer changed the repository. Reviewers are read-only; inspect and revert/unblock this manually.");
+    const reviewerTask = makeReviewerTask(state, paths, round, relativeTo(projectRoot, developerMarkdownPath));
+    const protocolRetries = protocolRetryLimit(state);
+    let reportAttempt = 0;
+    let reportError = null;
+    let reviewerFailure = null;
+    for (;;) {
+      let attemptOutput = null;
+      try {
+        reviewerBefore = await repositoryFingerprint(projectRoot);
+        attemptOutput = await invokeAgent({
+          role: "reviewer",
+          state,
+          paths,
+          round,
+          task: reportAttempt === 0
+            ? reviewerTask
+            : `${reviewerTask}\n\n${protocolRetryDirective({ role: "reviewer", attempt: reportAttempt - 1, limit: protocolRetries, error: reportError })}`,
+          piInvocation,
+          notify,
+          onStats,
+        });
+      } catch (error) {
+        reviewerFailure = error;
+        break;
       }
-      const parsedReviewer = extractReportObject(reviewerOutput.finalText, { keys: REVIEWER_REPORT_KEYS });
-      review = normalizeReviewerReport(parsedReviewer.value, round, state.openIssues);
-      reviewerRepair = parsedReviewer.repair;
-    } catch (error) {
-      const rawTextPath = await writeProtocolRawText(paths, "reviewer", round, reviewerOutput?.finalText || error?.agentFailure?.partialText);
+      reviewerUsage = attemptOutput.usage?.line || reviewerUsage;
+      reviewerOutput = attemptOutput;
+      try {
+        const reviewerAfter = await repositoryFingerprint(projectRoot);
+        if (reviewerBefore !== reviewerAfter) {
+          throw new Error("Reviewer changed the repository. Reviewers are read-only; inspect and revert/unblock this manually.");
+        }
+        const parsedReviewer = extractReportObject(attemptOutput.finalText, { keys: REVIEWER_REPORT_KEYS });
+        review = normalizeReviewerReport(parsedReviewer.value, round, state.openIssues);
+        reviewerRepair = parsedReviewer.repair;
+        break;
+      } catch (error) {
+        reportError = error;
+        // A mutation is not a report problem: never ask the same reviewer to retry.
+        const retryable = !/changed the repository/.test(String(error?.message || ""));
+        if (!retryable || reportAttempt >= protocolRetries) {
+          reviewerFailure = error;
+          break;
+        }
+        reportAttempt += 1;
+        await recordReportRetry({
+          paths,
+          projectRoot,
+          role: "reviewer",
+          round,
+          attempt: reportAttempt,
+          error,
+          rawTextPath: await writeProtocolRawText(paths, "reviewer", round, attemptOutput.finalText, reportAttempt - 1),
+        });
+      }
+    }
+    if (reviewerFailure) {
+      await recordReportFailure({ state, paths, projectRoot, role: "reviewer", round, error: reviewerFailure });
+      const finalText = reviewerOutput?.finalText || reviewerFailure?.agentFailure?.partialText;
+      const rawTextPath = await writeProtocolRawText(paths, "reviewer", round, finalText, reportAttempt);
       await escalate("reviewer-protocol-or-execution-error", {
-        summary: error.message,
+        summary: [
+          reviewerFailure.message,
+          reportAttempt > 0 && `Report retries exhausted after ${reportAttempt + 1} attempt(s).`,
+        ].filter(Boolean).join(" — "),
         ...(rawTextPath ? { rawTextPath: relativeTo(projectRoot, rawTextPath) } : {}),
       });
       return { state, paths, message: `Review requires human attention.\n${blockedNotice(state)}` };
@@ -3573,9 +3706,9 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     state.phase = "idle";
     state.updatedAt = now();
     await writeJson(paths.state, state);
-    if (round >= state.config.maxReviewRounds) {
+    if (round >= roundBudget(state)) {
       await escalate("max-rounds", {
-        summary: `The reviewer still requested fixes after round ${round}, which is the configured maximum of ${state.config.maxReviewRounds}.`,
+        summary: `The reviewer still requested fixes after round ${round}, which is the configured maximum of ${state.config.maxReviewRounds}.${budgetNote(state)}`,
       });
       return { state, paths, message: `Stopped after max rounds.\n${blockedNotice(state)}` };
     }
@@ -3611,17 +3744,18 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
   }
   if (options.maxRounds) state.config.maxReviewRounds = options.maxRounds;
   if (options.agentRetries !== undefined) state.config.agentRetries = options.agentRetries;
+  if (options.protocolRetries !== undefined) state.config.protocolRetries = options.protocolRetries;
   // Explicit on resume means "replace the frozen list"; omitting it keeps the state value.
   if (options.devSkills !== undefined) state.config.devSkills = normalizeDevSkills(options.devSkills, cwd) ?? [];
-  if (state.currentRound >= state.config.maxReviewRounds) {
+  if (state.currentRound >= roundBudget(state)) {
     await escalate("max-rounds", {
-      summary: `The configured limit of ${state.config.maxReviewRounds} review rounds was reached before a pass.`,
+      summary: `The configured limit of ${state.config.maxReviewRounds} review rounds was reached before a pass.${budgetNote(state)}`,
     });
     return { state, paths, message: `Stopped for human decision.\n${blockedNotice(state)}` };
   }
 
   await ensureArtifactDirectories(paths);
-  while (state.currentRound < state.config.maxReviewRounds) {
+  while (state.currentRound < roundBudget(state)) {
     const round = state.currentRound + 1;
     state.status = "running";
     state.phase = "development";
@@ -3635,29 +3769,69 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
     let developerRepair = null;
     let developerValue = null;
     let developerOutput = null;
-    try {
-      developerOutput = await invokeAgent({
-        role: "developer",
-        state,
-        paths,
-        round,
-        task: makeDeveloperTask(state, paths, round, previousReviewPath, humanDecisionPath),
-        piInvocation,
-        notify,
-        onStats,
-      });
-      developerUsage = developerOutput.usage?.line || null;
-      const parsedDeveloper = extractReportObject(developerOutput.finalText, { keys: DEVELOPER_REPORT_KEYS });
-      developerValue = parsedDeveloper.value;
-      developer = normalizeDeveloperReport(parsedDeveloper.value);
-      developerRepair = parsedDeveloper.repair;
-    } catch (error) {
+    // A rejected report is worth another attempt: the work is already done and the
+    // agent keeps its session, so it only has to re-emit what it already knows.
+    // Execution failures (child crash, stream break, abort) are retried inside
+    // invokePiAgent as agent retries and escalate here without a report retry.
+    const developerTask = makeDeveloperTask(state, paths, round, previousReviewPath, humanDecisionPath);
+    const protocolRetries = protocolRetryLimit(state);
+    let reportAttempt = 0;
+    let reportError = null;
+    let executionFailure = null;
+    for (;;) {
+      let attemptOutput = null;
+      try {
+        attemptOutput = await invokeAgent({
+          role: "developer",
+          state,
+          paths,
+          round,
+          task: reportAttempt === 0
+            ? developerTask
+            : `${developerTask}\n\n${protocolRetryDirective({ role: "developer", attempt: reportAttempt - 1, limit: protocolRetries, error: reportError })}`,
+          piInvocation,
+          notify,
+          onStats,
+        });
+      } catch (error) {
+        executionFailure = error;
+        break;
+      }
+      developerUsage = attemptOutput.usage?.line || developerUsage;
+      try {
+        const parsedDeveloper = extractReportObject(attemptOutput.finalText, { keys: DEVELOPER_REPORT_KEYS });
+        developerValue = parsedDeveloper.value;
+        developer = normalizeDeveloperReport(parsedDeveloper.value);
+        developerRepair = parsedDeveloper.repair;
+        developerOutput = attemptOutput;
+        break;
+      } catch (error) {
+        reportError = error;
+        developerOutput = attemptOutput;
+        if (reportAttempt >= protocolRetries) {
+          executionFailure = error;
+          break;
+        }
+        reportAttempt += 1;
+        await recordReportRetry({
+          paths,
+          projectRoot,
+          role: "developer",
+          round,
+          attempt: reportAttempt,
+          error,
+          rawTextPath: await writeProtocolRawText(paths, "developer", round, attemptOutput.finalText, reportAttempt - 1),
+        });
+      }
+    }
+    if (executionFailure) {
       state.currentRound = round;
+      await recordReportFailure({ state, paths, projectRoot, role: "developer", round, error: executionFailure });
       // Surface the developer's actual report/questions in the escalation when the
       // failure is a protocol-validation error (the agent did answer, just malformed).
       const finalText = typeof developerOutput?.finalText === "string" && developerOutput.finalText
         ? developerOutput.finalText
-        : (typeof error?.agentFailure?.partialText === "string" ? error.agentFailure.partialText : "");
+        : (typeof executionFailure?.agentFailure?.partialText === "string" ? executionFailure.agentFailure.partialText : "");
       let rawReport = developerValue;
       if (!rawReport) {
         try {
@@ -3669,11 +3843,12 @@ async function runWorkflow({ cwd, options, piInvocation = standalonePiInvocation
         ? String(rawReport.blockers[0])
         : "";
       const summary = [
-        error.message,
+        executionFailure.message,
+        reportAttempt > 0 && `Report retries exhausted after ${reportAttempt + 1} attempt(s).`,
         devSummary && `Developer: ${devSummary}`,
         firstBlocker && `Question: ${firstBlocker}`,
       ].filter(Boolean).join(" — ");
-      const rawTextPath = await writeProtocolRawText(paths, "developer", round, finalText);
+      const rawTextPath = await writeProtocolRawText(paths, "developer", round, finalText, reportAttempt);
       await escalate("developer-protocol-or-execution-error", {
         summary,
         ...(rawReport ? { rawReport: JSON.stringify(rawReport, null, 2) } : {}),

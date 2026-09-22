@@ -83,6 +83,7 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 - `--test` 可多次（每轮 dev/reviewer 都要跑）
 - `--agent-retries <n>`：单次 agent 运行因**瞬时执行故障**（provider 流中断、网络/超时、子进程异常退出）失败时自动重试次数（默认 2，即最多 3 次尝试；`0` 关闭）。额度/鉴权失败、用户中止与协议错误（报告 JSON 不合法）不重试。也可写在 `defaults.json` / `local.json`，或 `configure --agent-retries <n>` 覆盖到已有实例。
 - `--dev-skill <path>`：只给 developer 注入一个 Pi 技能（可重复，见 §3.4）；reviewer 永远不注入。
+- `--protocol-retries <n>`：**报告被拒后重试几次**（默认 1，即最多 2 次尝试，`0` 关闭）。当子 agent 的最终消息解析不了（JSON 语法/括号）或过不了 schema（字段不合格）时，在同一 session 里把失败原因回贴给它、并要求**只重出报告、不要重做工作**；修得出来就不算一轮失败。只是执行故障（子进程崩溃/断流/中止）走的是 `--agent-retries`，两者互不替代。
 - 工作树有"故意要被评审的代码"时加 `--allow-dirty`（仅 start 检查，run 不检查）
 - **多批次总纲 plan**（一份文件多个批次、已验证部分批次）：引擎**不会拆分文件**，dev/reviewer 按文件里的「当前执行批次」标记执行；每次改 plan 内容 → 新 hash → 新实例。主 agent 用 `dev_review_start` 启动这类 plan 时会先返回提醒，让你选 (a) 按当前批次口径直接开始（`confirm_master_plan=true`），还是 (b) 先把这一批的子 plan/范围/做法聊定再启动；你手输 `/dev-review start` 则视为已拍板、直接开始。
 - **产物目录命名（每批一个 plan 文件时不要传 label）**：默认目录名 = `<plan 文件名去扩展名>--<plan 内容 hash 前8位>`，例如 `v1-2-b2c-settings-ia-fix-plan--da037be4`——版本、批次、主题、计划版本一眼可辨（改过 plan 内容会得到新 hash 新目录）。`--workflow <label>` 是**整体替换**这个名字而不是前缀：传 `b2c` 只会得到 `b2c--da037be4`，版本号就没了。所以只有「同一份 plan 要跑出第二个独立实例」（重跑/对照实验）才传 label，并且带上版本，如 `v1.2-b2c-rerun`。
@@ -267,4 +268,5 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 - **外部启动的轮询间隔**：默认 10s，`DEV_REVIEW_POLL_MS`（毫秒）可调。
 - **停滞检测的运行期行为**：`reports/findings.jsonl` 可删，等于清空跨轮家族历史（不回滚 `openIssues`，只是不再有家族感知）；`stallGate` 随实例冻结，改阈值需要新实例；`enabled:false` 只关判定层，`findings.jsonl` 仍写。
 - **报告 JSON 括号修复（默认开）**：子 agent 写完整份报告却漏掉 `]`/`}` 时（典型：`resolved_issues` 元素写完忘了关数组，后续顶层字段被裹进元素里，`stopReason` 仍然是正常的 `stop`），解析层会尝试**唯一解**的括号补齐——只在能解析、所有报告字段都在顶层、且不产生重复顶层键时采用，否则照旧升级给人；修补是原地插字符，原文存 `*.raw.txt`、审计写 `*.repair.json`、timeline 记一行 `report-repaired`、handoff 末尾附说明，`DEV_REVIEW_REPORT_REPAIR=0` 可关。输出真的在容器中途断掉时不修（分不清漏括号还是截断）。
+- **报告被拒会重试，且不吃轮次预算**：报告解析不了/过不了 schema 时，默认在同一 session 重试 1 次（`--protocol-retries`，附失败原因 + 「只重出 JSON，别重做工作」）；仍失败则升级给人。这类失败（含执行故障）**不消耗 `max-rounds`**——预算按成功产出轮次算，`Round:` 行与 `Report failures:` 行会写明已排除几轮。
 - 完整的注意事项清单（含纪律注入、审计文件、隔离边界）见 `docs/known-issues.md`，本节的条目是它的常用子集。

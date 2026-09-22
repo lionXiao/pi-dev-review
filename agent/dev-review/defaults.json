@@ -3,6 +3,7 @@
   "maxReviewRounds": 10,
   "developerResetAfterRounds": 4,
   "agentRetries": 2,
+  "protocolRetries": 1,
   "devSkills": [],
   "testCommands": [],
   "developerThinking": null,

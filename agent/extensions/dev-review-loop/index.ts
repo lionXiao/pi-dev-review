@@ -779,6 +779,11 @@ export default function (pi: any) {
       test: Type.Optional(Type.String({ description: "Test command recorded in the workflow (combined string; quote inside is fine)" })),
       max_rounds: Type.Optional(Type.Number({ description: "Override max review rounds" })),
       agent_retries: Type.Optional(Type.Number({ description: "Automatic retries per agent run on transient execution failures (default from defaults.json)" })),
+      protocol_retries: Type.Optional(Type.Number({
+        description:
+          "Automatic retries when an agent's final report cannot be parsed or validated (default 1). " +
+          "The retry stays in the same session and asks for a corrected report only — the work is not redone.",
+      })),
       dev_skills: Type.Optional(Type.Array(Type.String(), {
         description:
           "Skill paths injected into the developer sub-agent only (pi --skill; file or directory). " +
@@ -822,6 +827,7 @@ export default function (pi: any) {
       if (params.test) args.push("--test", JSON.stringify(String(params.test)));
       if (params.max_rounds) args.push("--max-rounds", String(params.max_rounds));
       if (params.agent_retries !== undefined) args.push("--agent-retries", String(params.agent_retries));
+      if (params.protocol_retries !== undefined) args.push("--protocol-retries", String(params.protocol_retries));
       // JSON.stringify keeps paths with spaces intact through the engine's shell-like tokenizer.
       for (const skill of params.dev_skills ?? []) args.push("--dev-skill", JSON.stringify(String(skill)));
       if (params.label) args.push("--workflow", params.label);

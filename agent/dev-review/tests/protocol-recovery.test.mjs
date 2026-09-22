@@ -142,7 +142,7 @@ test("repairUnbalancedReport: a splice that would duplicate a top-level key is r
   assert.equal(result.reason, "none");
 });
 
-async function readyFixture() {
+async function readyFixture(configOverrides = {}) {
   const tempRoot = await mkdtemp(join(tmpdir(), "dev-review-protocol-"));
   // git reports the realpath (/private/var/... on macOS), so the fixture state
   // must use the same root or relativeTo() climbs out of the project.
@@ -192,6 +192,7 @@ async function readyFixture() {
         maxReviewRounds: 10,
         developerResetAfterRounds: 4,
         testCommands: [],
+        ...configOverrides,
       },
       developerSession: { generation: 1, sessionId: "developer-g1" },
       openIssues: [],
@@ -269,6 +270,134 @@ test("run: a report with a dropped closing bracket keeps the round instead of bl
     const timeline = await readFile(join(root, ".ai-dev-review", "demo--abc12345", "reports", "timeline.md"), "utf8");
     assert.match(timeline, /report-repaired/);
     assert.match(timeline, /inserted `}\]` before `tests`/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run: a rejected report is retried in the same session and keeps the round", async () => {
+  const root = await readyFixture();
+  try {
+    const PASS_REVIEW = JSON.stringify({
+      decision: "pass",
+      summary: "ok",
+      previous_issue_verdicts: [],
+      new_findings: [],
+      tests: [],
+      spec_questions: [],
+      handoff_to_developer: "none",
+    });
+    const tasks = [];
+    let developerCalls = 0;
+    const result = await runCommand({
+      args: "run",
+      cwd: root,
+      notify: () => {},
+      invokeAgent: async ({ role, task }) => {
+        if (role === "developer") {
+          tasks.push(task);
+          developerCalls += 1;
+          return { finalText: developerCalls === 1 ? MALFORMED_REPORT : JSON.stringify(EXPECTED_REPORT), usage: null };
+        }
+        return { finalText: PASS_REVIEW, usage: null };
+      },
+    });
+    assert.equal(result.state.status, "passed", "the retry must save the round");
+    assert.equal(developerCalls, 2, "the developer is called twice");
+    // The retry carries the reason and the no-redo instruction.
+    assert.match(tasks[0], /You are the DEVELOPMENT role/);
+    assert.doesNotMatch(tasks[0], /Report retry/);
+    assert.match(tasks[1], /## Report retry \(attempt 1 of 2 — engine-injected\)/);
+    assert.match(tasks[1], /must NOT be redone/);
+    assert.match(tasks[1], /malformed JSON/);
+
+    const handoffs = join(root, ".ai-dev-review", "demo--abc12345", "handoffs");
+    // The rejected attempt is preserved under its own name.
+    assert.equal(await readFile(join(handoffs, "developer-r01.raw.txt"), "utf8"), MALFORMED_REPORT);
+    assert.equal(JSON.parse(await readFile(join(handoffs, "developer-r01.json"), "utf8")).status, "done");
+
+    const timeline = await readFile(join(root, ".ai-dev-review", "demo--abc12345", "reports", "timeline.md"), "utf8");
+    assert.match(timeline, /report-retry/);
+    // A retried report is not a failed round.
+    assert.equal(result.state.currentRound, 1);
+    assert.equal(result.state.reportFailures ?? undefined, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run: --protocol-retries 0 escalates the first rejection without retrying", async () => {
+  const root = await readyFixture();
+  try {
+    let developerCalls = 0;
+    const result = await runCommand({
+      args: "run --protocol-retries 0",
+      cwd: root,
+      notify: () => {},
+      invokeAgent: async ({ role }) => {
+        if (role !== "developer") return { finalText: "{}", usage: null };
+        developerCalls += 1;
+        return { finalText: MALFORMED_REPORT, usage: null };
+      },
+    });
+    assert.equal(developerCalls, 1, "no retry when the limit is zero");
+    assert.equal(result.state.status, "blocked");
+    assert.equal(result.state.blocked.reason, "developer-protocol-or-execution-error");
+    assert.equal(result.state.reportFailures.length, 1);
+    assert.match(result.state.blocked.details.summary, /malformed JSON/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run: a failed round does not consume the review budget", async () => {
+  // One configured round: the first attempt dies on a protocol error, the second
+  // (after the human resolves) must still be allowed to run.
+  const root = await readyFixture({ maxReviewRounds: 1, protocolRetries: 0 });
+  try {
+    const blocked = await runCommand({
+      args: "run",
+      cwd: root,
+      notify: () => {},
+      invokeAgent: async ({ role }) => ({
+        finalText: role === "developer" ? MALFORMED_REPORT : "{}",
+        usage: null,
+      }),
+    });
+    assert.equal(blocked.state.status, "blocked");
+    assert.equal(blocked.state.reportFailures.length, 1);
+    assert.equal(blocked.state.reportFailures[0].round, 1);
+
+    const PASS_REVIEW = JSON.stringify({
+      decision: "pass",
+      summary: "ok",
+      previous_issue_verdicts: [],
+      new_findings: [],
+      tests: [],
+      spec_questions: [],
+      handoff_to_developer: "none",
+    });
+    const resolved = await runCommand({
+      args: "resolve --choose retry --note 'protocol repair done'",
+      cwd: root,
+      notify: () => {},
+    });
+    assert.equal(resolved.state.status, "ready");
+
+    const passed = await runCommand({
+      args: "run",
+      cwd: root,
+      notify: () => {},
+      invokeAgent: async ({ role }) => ({
+        finalText: role === "developer" ? JSON.stringify(EXPECTED_REPORT) : PASS_REVIEW,
+        usage: null,
+      }),
+    });
+    assert.equal(passed.state.status, "passed", "the excluded round must not trigger max-rounds");
+    assert.equal(passed.state.currentRound, 2);
+    const timeline = await readFile(join(root, ".ai-dev-review", "demo--abc12345", "reports", "timeline.md"), "utf8");
+    assert.match(timeline, /report-failure/);
+    assert.match(timeline, /round budget extended/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
