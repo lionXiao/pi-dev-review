@@ -1265,6 +1265,9 @@ async function invokePiAgent({ role, state, paths, round, task, piInvocation, no
   const stats = createUsageStats();
   const label = `${developer ? "dev" : "review"} r${round}`;
 
+  // `reports/timeline.md` is the full process log: open a section per phase so
+  // the transcript below reads chronologically as dev r1 → review r1 → dev r2 …
+  await appendTimeline(paths, transcriptPhaseHeader({ role, round, model: config.model }));
   notify?.(`${developer ? "Development" : "Review"} agent: round ${round} started (${config.model}${config.thinking ? ` · thinking ${config.thinking}` : ""}).`);
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -1372,10 +1375,14 @@ async function spawnPiAgentOnce({ role, state, paths, round, args, piInvocation,
           errorMessage: typeof event.message.errorMessage === "string" ? event.message.errorMessage : "",
         };
         if (streamEnabled) notify?.(`[${label}] 💬 ${truncate(finalText, 220)}`);
+        queueTimelineLines(paths, transcriptAssistantBlock(event.message));
+      } else if (event.type === "tool_execution_end") {
+        queueTimelineLines(paths, transcriptToolResultBlock(event));
+        if (streamEnabled && event.isError) {
+          notify?.(`[${label}] ⚠️ ${event.toolName} failed: ${truncate(event.result, 160)}`);
+        }
       } else if (streamEnabled && event.type === "tool_execution_start") {
         notify?.(`[${label}] 🔧 ${event.toolName} ${truncate(JSON.stringify(event.args ?? {}), 140)}`);
-      } else if (streamEnabled && event.type === "tool_execution_end" && event.isError) {
-        notify?.(`[${label}] ⚠️ ${event.toolName} failed: ${truncate(event.result, 160)}`);
       }
     };
 
@@ -2212,7 +2219,12 @@ async function recordStallEvents(state, paths, detection) {
 //     definition (connection, request upload, gateway queue and prefill included).
 //   - The parent stamps `startAt` when it receives message_start (SSE response
 //     headers). The requestAt → startAt gap is reported separately as `setup`.
-//   - `outputPerSec` stays decode-only: first delta → message_end.
+//   - `outputPerSec` follows the documented throughput convention (OpenRouter
+//     `generation_time`: "from dispatching the upstream request until its
+//     response body ended. Divide the completion token count by this for
+//     throughput."): requestAt → message_end, so TTFT is included. Artificial
+//     Analysis' "Output Speed" (and Ollama's eval rate) is decode-only and can
+//     be derived from the separately reported TTFT.
 
 function formatTokenCount(value) {
   const n = Number(value) || 0;
@@ -2234,7 +2246,8 @@ function createUsageStats() {
     ttftSamples: 0,
     setupMs: 0,
     setupSamples: 0,
-    outputMs: 0,
+    requestMs: 0,
+    timedOutput: 0,
     latest: null,
     updatedAt: null,
   };
@@ -2263,8 +2276,17 @@ function addUsageRequest(stats, request) {
     stats.ttftMs += Math.max(0, request.firstDeltaAt - request.startAt);
     stats.ttftSamples += 1;
   }
-  if (request.firstDeltaAt && request.endAt) {
-    stats.outputMs += Math.max(0, request.endAt - request.firstDeltaAt);
+  if (request.endAt) {
+    // Throughput window: the provider request itself (stamped by the child just
+    // before it dispatches) → message_end. Falls back to stream-open → end when
+    // the child does not stamp `message.timestamp`. Only tokens that have a
+    // window count toward the rate, so a request without timing can never
+    // inflate it.
+    const startedAt = request.requestAt ?? request.startAt ?? request.firstDeltaAt;
+    if (startedAt) {
+      stats.requestMs += Math.max(0, request.endAt - startedAt);
+      stats.timedOutput += Number(usage.output) || 0;
+    }
   }
   stats.latest = {
     input: Number(usage.input) || 0,
@@ -2285,7 +2307,9 @@ function usageLine(stats) {
   const cache = stats.cacheRead || stats.cacheWrite
     ? `R${formatTokenCount(stats.cacheRead)}${stats.cacheWrite ? ` W${formatTokenCount(stats.cacheWrite)}` : ""}${prompt > 0 ? ` (CH ${((stats.cacheRead / prompt) * 100).toFixed(1)}%)` : ""}`
     : null;
-  const speed = stats.outputMs > 0 ? `${(stats.output / (stats.outputMs / 1000)).toFixed(1)} tok/s` : null;
+  const speed = stats.requestMs > 0 && stats.timedOutput > 0
+    ? `${(stats.timedOutput / (stats.requestMs / 1000)).toFixed(1)} tok/s`
+    : null;
   const ttft = stats.ttftSamples > 0
     ? `TTFT ${(stats.ttftMs / stats.ttftSamples / 1000).toFixed(2)}s${stats.setupSamples > 0 ? ` (setup ${(stats.setupMs / stats.setupSamples / 1000).toFixed(2)}s)` : ""}`
     : null;
@@ -2314,7 +2338,9 @@ function usageEntry({ role, round, stats }) {
     totalTokens: stats.totalTokens,
     ttftAvgMs: stats.ttftSamples ? Math.round(stats.ttftMs / stats.ttftSamples) : null,
     setupAvgMs: stats.setupSamples ? Math.round(stats.setupMs / stats.setupSamples) : null,
-    outputPerSec: stats.outputMs > 0 ? Number((stats.output / (stats.outputMs / 1000)).toFixed(1)) : null,
+    outputPerSec: stats.requestMs > 0 && stats.timedOutput > 0
+      ? Number((stats.timedOutput / (stats.requestMs / 1000)).toFixed(1))
+      : null,
     cacheHitRate: prompt > 0 && (stats.cacheRead > 0 || stats.cacheWrite > 0)
       ? Number((stats.cacheRead / prompt).toFixed(4))
       : null,
@@ -2380,23 +2406,164 @@ function timelineFilePath(paths) {
   return path.join(paths.reports, "timeline.md");
 }
 
+// ---- Full-process transcript, written into the same timeline file ---------
+// `reports/timeline.md` is the whole log, not just milestones: milestone lines
+// (plan freeze → dev rN → review rN → decision → pass/blocked) and the readable
+// dev/review process share one append-only file, so `tail -f` works during a run
+// and the finished file is both roles' transcripts concatenated in order. Raw
+// transcripts (including anything capped here) stay in private/ (pi session
+// JSONL). `DEV_REVIEW_TRANSCRIPT=0` restores the milestones-only timeline;
+// `DEV_REVIEW_TRANSCRIPT=full` also inlines the thinking text (default: a
+// one-line thinking marker with the provider's reasoning-token count, which
+// keeps the log readable — the full text stays in private/).
+const TRANSCRIPT_ARGS_LIMIT = 1200;
+const TRANSCRIPT_RESULT_LIMIT = 8000;
+const TRANSCRIPT_RESULT_HEAD = 5000;
+
+function transcriptEnabled() {
+  return process.env.DEV_REVIEW_TRANSCRIPT !== "0";
+}
+
+function transcriptFullThinking() {
+  return process.env.DEV_REVIEW_TRANSCRIPT === "full";
+}
+
 /**
- * Append-only, human-readable log of the whole workflow: plan freeze →
- * development rN → review rN → human decision / escalation → pass. Never
- * rewritten, so interrupted and resumed runs stay in one chronological file
- * (`reports/timeline.md`), while the per-role details live in handoffs/.
+ * Fence arbitrary text safely: the fence is one backtick longer than the
+ * longest backtick run inside, so tool output that itself contains code fences
+ * never breaks out of the block.
  */
-async function appendTimeline(paths, lines) {
+function fencedBlock(text, info = "text") {
+  const runs = String(text).match(/`+/g) || [];
+  const fence = "`".repeat(Math.max(3, ...runs.map((run) => run.length + 1)));
+  return `${fence}${info}\n${text}\n${fence}`;
+}
+
+/** Quote every line so thinking renders as one visually distinct block. */
+function quotedBlock(text) {
+  return String(text).split("\n").map((line) => (line ? `> ${line}` : ">")).join("\n");
+}
+
+/** Tool arguments as one compact line; `write`/`edit` payloads get truncated. */
+function transcriptArgs(value) {
+  let json;
+  try {
+    json = JSON.stringify(value ?? {});
+  } catch {
+    json = String(value);
+  }
+  const compact = String(json).replace(/\s+/g, " ").trim();
+  return compact.length > TRANSCRIPT_ARGS_LIMIT
+    ? `${compact.slice(0, TRANSCRIPT_ARGS_LIMIT - 1)}…`
+    : compact;
+}
+
+function transcriptResultText(result) {
+  const content = result?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (typeof part === "string" ? part : typeof part?.text === "string" ? part.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function cappedResultText(text) {
+  if (text.length <= TRANSCRIPT_RESULT_LIMIT) return text;
+  const tailLength = TRANSCRIPT_RESULT_LIMIT - TRANSCRIPT_RESULT_HEAD;
+  const omitted = text.length - TRANSCRIPT_RESULT_LIMIT;
+  return `${text.slice(0, TRANSCRIPT_RESULT_HEAD)}\n… [${omitted} chars omitted · full output in private/ session transcript] …\n${text.slice(-tailLength)}`;
+}
+
+/** Phase opener: `## dev r1 · <model> · <local time>`. */
+function transcriptPhaseHeader({ role, round, model }) {
+  if (!transcriptEnabled()) return null;
+  const name = role === "developer" ? "dev" : "review";
+  return `\n## ${name} r${round} · ${model || "unknown model"} · ${localNow()}`;
+}
+
+/** One assistant message → heading + text + thinking + tool calls, in order. */
+function transcriptAssistantBlock(message) {
+  if (!transcriptEnabled()) return null;
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+  const text = blocks
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
+  const thinking = blocks
+    .filter((block) => block?.type === "thinking" && typeof block.thinking === "string")
+    .map((block) => block.thinking)
+    .join("\n\n")
+    .trim();
+  const calls = blocks.filter((block) => block?.type === "toolCall");
+  if (!text && !thinking && !calls.length) return null;
+  const stamp = Number(message?.timestamp);
+  const stopReason = typeof message?.stopReason === "string" ? message.stopReason : null;
+  const warning = stopReason === "error" || stopReason === "aborted" || stopReason === "length"
+    ? ` · ⚠️ ${stopReason}${message?.errorMessage ? `: ${truncateText(message.errorMessage, 200)}` : ""}`
+    : "";
+  const parts = [`### ${localNow(Number.isFinite(stamp) ? new Date(stamp) : new Date())} · assistant${warning}`];
+  if (text) parts.push(text);
+  if (thinking) {
+    if (transcriptFullThinking()) {
+      parts.push("**🧠 thinking**", quotedBlock(thinking));
+    } else {
+      const reasoning = Number(message?.usage?.reasoning) || 0;
+      const size = reasoning ? `${formatTokenCount(reasoning)} tok` : `${thinking.length} chars`;
+      parts.push(`**🧠 thinking** · ${size} · full text in private/ session transcript`);
+    }
+  }
+  if (calls.length) {
+    parts.push(
+      "**🔧 tools**",
+      calls.map((call) => `- \`${call.name}\` · ${transcriptArgs(call.arguments)}`).join("\n"),
+    );
+  }
+  return `${parts.join("\n\n")}\n`;
+}
+
+/** One tool execution → `↳ ✅/❌ <tool> · <size>` plus capped output. */
+function transcriptToolResultBlock({ toolName, result, isError }) {
+  if (!transcriptEnabled()) return null;
+  const text = transcriptResultText(result).trim();
+  const lines = text ? text.split("\n").length : 0;
+  const size = text.length > TRANSCRIPT_RESULT_LIMIT ? ` · ${text.length} chars` : "";
+  const head = `↳ ${isError ? "❌" : "✅"} \`${toolName || "tool"}\` · ${lines} ${lines === 1 ? "line" : "lines"}${size}`;
+  if (!text) return `${head}\n`;
+  return `${head}\n\n${fencedBlock(cappedResultText(text))}\n`;
+}
+
+/**
+ * Serialize every timeline write — milestones and transcript blocks — so file
+ * order matches event order no matter which async caller enqueues first.
+ */
+let timelineWriteChain = Promise.resolve();
+function queueTimelineLines(paths, lines) {
   const entries = (Array.isArray(lines) ? lines : [lines]).filter(
     (line) => typeof line === "string" && line.length > 0,
   );
-  if (!entries.length) return;
-  try {
-    await mkdir(paths.reports, { recursive: true });
-    await appendFile(timelineFilePath(paths), `${entries.join("\n")}\n`, "utf8");
-  } catch {
-    // The timeline is a convenience artifact; never fail a run because of it.
-  }
+  if (!entries.length) return timelineWriteChain;
+  timelineWriteChain = timelineWriteChain
+    .then(async () => {
+      await mkdir(paths.reports, { recursive: true });
+      await appendFile(timelineFilePath(paths), `${entries.join("\n")}\n`, "utf8");
+    })
+    .catch(() => {
+      // The timeline is a convenience artifact; never fail a run because of it.
+    });
+  return timelineWriteChain;
+}
+
+/**
+ * Append-only, human-readable log of the whole workflow: plan freeze →
+ * development rN → review rN → human decision / escalation → pass, with the
+ * full dev/review process (assistant text, thinking, tool calls and results)
+ * interleaved in chronological order. Never rewritten, so interrupted and
+ * resumed runs stay in one file.
+ */
+async function appendTimeline(paths, lines) {
+  await queueTimelineLines(paths, lines);
 }
 
 function timelineLine({ round, event, status, summary, artifact, usage }) {

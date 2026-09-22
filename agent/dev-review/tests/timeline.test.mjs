@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -107,6 +107,127 @@ async function blockedFixture() {
   );
   return root;
 }
+
+// Fake pi child that streams a thinking block, an assistant answer, a tool call
+// and a big tool result before returning the protocol JSON — the event stream a
+// real run produces, minus the provider.
+const TRANSCRIPT_FAKE_PI = `const args = process.argv.slice(2);
+const model = args[args.indexOf("--model") + 1] || "";
+const developer = model.includes("dev");
+const report = developer
+  ? { status: "done", summary: "implemented", changed_files: [], requirements_covered: [], resolved_issues: [], tests: [], assumptions: [], risks: [], handoff_to_reviewer: "check", blockers: [] }
+  : { decision: "pass", summary: "looks good", previous_issue_verdicts: [], new_findings: [], spec_questions: [], handoff_to_developer: "none" };
+const usage = { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: 5, totalTokens: 35, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+const write = (obj) => process.stdout.write(JSON.stringify(obj) + "\\n");
+write({ type: "message_start", message: { role: "assistant", content: [], timestamp: Date.now() } });
+write({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "t" } });
+write({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [
+  { type: "thinking", thinking: "THINKING-MARKER" },
+  { type: "text", text: "TEXT-MARKER-" + (developer ? "dev" : "review") },
+  { type: "toolCall", id: "c1", name: "read", arguments: { path: "src/big-file.txt" } }
+], usage } });
+write({ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: { path: "src/big-file.txt" } });
+write({ type: "tool_execution_end", toolCallId: "c1", toolName: "read", isError: false, result: { content: [{ type: "text", text: "RESULT-HEAD" + "x".repeat(9000) + "RESULT-TAIL" }] } });
+write({ type: "message_start", message: { role: "assistant", content: [], timestamp: Date.now() } });
+write({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(report) }], usage } });
+process.exit(0);
+`;
+
+async function transcriptFixture() {
+  const tempRoot = await mkdtemp(join(tmpdir(), "dev-review-transcript-"));
+  const root = realpathSync(tempRoot);
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: root });
+  await writeFile(join(root, "PLAN.md"), "# Plan\n", "utf8");
+  const script = join(root, "fake-pi.mjs");
+  await writeFile(script, TRANSCRIPT_FAKE_PI, "utf8");
+  return { root, script };
+}
+
+async function runTranscriptFixture({ transcript = null } = {}) {
+  const { root, script } = await transcriptFixture();
+  const previous = {
+    dev: process.env.DEV_REVIEW_DEVELOPER_MODEL,
+    rev: process.env.DEV_REVIEW_REVIEWER_MODEL,
+    transcript: process.env.DEV_REVIEW_TRANSCRIPT,
+  };
+  process.env.DEV_REVIEW_DEVELOPER_MODEL = "fake/dev";
+  process.env.DEV_REVIEW_REVIEWER_MODEL = "fake/rev";
+  if (transcript) process.env.DEV_REVIEW_TRANSCRIPT = transcript;
+  else delete process.env.DEV_REVIEW_TRANSCRIPT;
+  try {
+    const result = await runCommand({
+      args: "start PLAN.md --allow-dirty",
+      cwd: root,
+      piInvocation: { command: process.execPath, args: [script] },
+      notify: () => {},
+      onReport: async () => {},
+    });
+    return { result, timeline: await readFile(join(result.paths.reports, "timeline.md"), "utf8") };
+  } finally {
+    for (const [key, value] of [
+      ["DEV_REVIEW_DEVELOPER_MODEL", previous.dev],
+      ["DEV_REVIEW_REVIEWER_MODEL", previous.rev],
+      ["DEV_REVIEW_TRANSCRIPT", previous.transcript],
+    ]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("timeline: development and review process is appended to the milestones in order", async () => {
+  const { result, timeline } = await runTranscriptFixture();
+  assert.equal(result.state.status, "passed");
+
+  // One phase header per role+round, with the frozen model.
+  assert.match(timeline, /^## dev r1 · fake\/dev · \d{4}-\d{2}-\d{2} /m);
+  assert.match(timeline, /^## review r1 · fake\/rev · \d{4}-\d{2}-\d{2} /m);
+
+  // Assistant text is verbatim; thinking is a one-line marker by default.
+  assert.match(timeline, /^### .* · assistant$/m);
+  assert.ok(timeline.includes("TEXT-MARKER-dev"), "developer answer");
+  assert.ok(timeline.includes("TEXT-MARKER-review"), "reviewer answer");
+  assert.ok(timeline.includes("**🧠 thinking** · 5 tok · full text in private/ session transcript"), "thinking marker");
+  assert.ok(!timeline.includes("THINKING-MARKER"), "thinking text is not inlined by default");
+
+  // Tool intent and result, with the oversized output capped but head+tail kept.
+  assert.ok(timeline.includes('- `read` · {"path":"src/big-file.txt"}'), "tool call line");
+  assert.ok(timeline.includes("↳ ✅ `read` · 1 line · 9022 chars"), "tool result header");
+  assert.ok(timeline.includes("RESULT-HEAD") && timeline.includes("RESULT-TAIL"), "result head+tail");
+  assert.ok(timeline.includes("chars omitted"), "truncation marker");
+  assert.ok(!timeline.includes("x".repeat(6000)), "middle of the capped result is dropped");
+
+  // Strict chronological order: dev phase → dev tool result → review phase.
+  const positions = [
+    timeline.indexOf("## dev r1"),
+    timeline.indexOf("TEXT-MARKER-dev"),
+    timeline.indexOf("↳ ✅"),
+    timeline.indexOf("## review r1"),
+    timeline.indexOf("TEXT-MARKER-review"),
+  ];
+  assert.ok(positions.every((value) => value >= 0), `missing section: ${positions}`);
+  assert.deepEqual(positions, [...positions].sort((left, right) => left - right));
+
+  // Milestone lines still mark the same file.
+  assert.match(timeline, /· r1 · development · \*\*done\*\*/);
+  assert.match(timeline, /· r1 · review · \*\*pass\*\*/);
+});
+
+test("timeline: DEV_REVIEW_TRANSCRIPT=full inlines the thinking text", async () => {
+  const { timeline } = await runTranscriptFixture({ transcript: "full" });
+  assert.ok(timeline.includes("**🧠 thinking**") && timeline.includes("> THINKING-MARKER"), "thinking block");
+});
+
+test("timeline: DEV_REVIEW_TRANSCRIPT=0 keeps milestones only", async () => {
+  const { timeline } = await runTranscriptFixture({ transcript: "0" });
+  assert.match(timeline, /· r1 · development · \*\*done\*\*/);
+  assert.doesNotMatch(timeline, /^## (dev|review) r1/m);
+  assert.doesNotMatch(timeline, /^### /m);
+  assert.ok(!timeline.includes("TEXT-MARKER-dev"));
+  assert.ok(!timeline.includes("↳"));
+});
 
 test("status: shows blocked details and the unified timeline path", async () => {
   const root = await blockedFixture();

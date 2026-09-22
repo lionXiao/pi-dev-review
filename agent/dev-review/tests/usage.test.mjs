@@ -17,13 +17,13 @@ test("formatTokenCount / usageLine: pi-style summary with cache hit rate, speed 
   addUsageRequest(stats, {
     startAt: 1000,
     firstDeltaAt: 1800, // TTFT 800ms
-    endAt: 3800, // generation 2000ms for 2000 output tokens => 1000 tok/s
+    endAt: 3800, // throughput window 2800ms for 2000 output tokens => 714.3 tok/s
     usage: { input: 1000, output: 2000, cacheRead: 99_000, cacheWrite: 0, reasoning: 500, totalTokens: 102_000 },
   });
   const line = usageLine(stats);
   assert.match(line, /tokens ↑1\.0k ↓2\.0k/);
   assert.match(line, /R99\.0k \(CH 99\.0%\)/);
-  assert.match(line, /1000\.0 tok\/s/);
+  assert.match(line, /714\.3 tok\/s/);
   assert.match(line, /TTFT 0\.80s/);
   assert.match(line, /think 500/);
 
@@ -31,7 +31,7 @@ test("formatTokenCount / usageLine: pi-style summary with cache hit rate, speed 
   assert.equal(entry.requests, 1);
   assert.equal(entry.ttftAvgMs, 800);
   assert.equal(entry.setupAvgMs, null);
-  assert.equal(entry.outputPerSec, 1000);
+  assert.equal(entry.outputPerSec, 714.3);
   assert.equal(entry.cacheHitRate, 0.99);
   assert.equal(entry.line, line);
 });
@@ -50,6 +50,9 @@ test("usageLine/usageEntry: standard client-side TTFT plus the pre-stream setup 
   const entry = usageEntry({ role: "developer", round: 1, stats });
   assert.equal(entry.ttftAvgMs, 1600);
   assert.equal(entry.setupAvgMs, 800);
+  // Throughput counts the whole provider request (dispatch -> message_end), the
+  // documented OpenRouter `generation_time` convention, not just the decode gap.
+  assert.equal(entry.outputPerSec, 55.6);
 });
 
 test("usageLine: no cache reporting and no timing degrades gracefully", () => {

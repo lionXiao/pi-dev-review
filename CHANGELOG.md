@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — 时间线升级为全过程日志
+
+- **`reports/timeline.md` 现在同时是 dev/review 的完整过程日志**（真实反馈：停止唤醒消息说时间线「按顺序记录 dev/review/决策全过程」，但文件里只有每阶段一行摘要，全过程得去 `private/` 翻 JSONL）。同一份 append-only 文件里，里程碑行之间按时间顺序追加该阶段的 assistant 正文、thinking 标记、工具调用（名称 + 参数一行，超 1200 字符截断）与工具结果；阶段头 `## dev r1 · <model> · <本地时间>`，消息头 `### <本地时间> · assistant`，出错/截断轮在消息头标 `⚠️ error/aborted/length`。工具结果超 8000 字符保留头 5000 + 尾 3000 并写 `[N chars omitted · full output in private/ session transcript]`；fence 长度按内容里的反引号串自适应，工具输出里的代码块不会截断日志。
+- **thinking 默认不内联**：每个 assistant 消息只写一行 `🧠 thinking · N tok · full text in private/ session transcript`（N 取 provider 报的 `usage.reasoning`），避免整个日志被思考草稿刷屏（实测占篇幅约一半）；需要全文时 `DEV_REVIEW_TRANSCRIPT=full` 用 `>` 引用块内联，逐字原文一直在 `private/` 的 session JSONL。
+- **`tok/s` 改成业界文档化的口径**（真实质疑：「200 多但实际好像没那么多」）：输出 token（含 reasoning）÷ **请求发出 → 消息结束**，即 OpenRouter 对 `generation_time` 的定义（"from dispatching the upstream request until its response body ended. Divide the completion token count by this for throughput."），把 TTFT 计入、仍不含工具执行与协调时间。旧口径是首个 token 后的解码速度（Artificial Analysis "Output Speed"/Ollama eval rate）；因为 TTFT 仍然单独输出（`TTFT 2.26s (setup 1.81s)`），解码速度可直接反推，也不用另立字段。实测上次 run 的 dev r1：旧口径 240.6 tok/s → 新口径 186.2 tok/s，与阶段墙钟（181.7）基本对上。
+- 所有 timeline 写入（里程碑 + 过程）走同一条串行写队列，文件顺序与事件顺序一致；`DEV_REVIEW_TRANSCRIPT=0` 恢复「只有里程碑」的旧行为；写入失败仍然只吞掉、不影响运行（timeline 是便利产物）。
+- 新增 `timeline.test.mjs` 端到端用例（假 pi 产出 thinking/正文/工具调用/超长结果）：断言阶段头、正文、thinking 标记、工具行、结果头尾与截断标记、dev → review 的严格先后顺序、里程碑行仍在；另加 `full`/`0` 两个开关的用例。`usage.test.mjs` 同步断言新 throughput 口径（含 TTFT、兼容无 `requestAt` 的旧子进程回退）。
+
 ## Unreleased — dev-skill 校验与 pi 的加载规则对齐
 
 - **`--dev-skill` 现在会拒绝 pi 实际会静默忽略的技能**（真实场景：技能目录里 `SKILL.md` 存在但没有 frontmatter，或 `description` 为空/不可解析——pi 的 `loadSkillFromFile` 会返回 `{skill:null}`，显式 `--skill` 路径连 warning 都不显示）。旧校验只查「文件/目录存在、目录含 `SKILL.md`」，这种技能能通过 init/configure，直到第 3 轮以「技能没生效」的形式暴露。现在按 pi 的规则（frontmatter 可解析且 `description` 为非空字符串）在 init/run/configure 前置失败，错误信息直接给出文件路径和修法；兼容 inline/引号/块标量（`|`、`>`）等 YAML 写法，本机 17 个真实技能全部通过（无误报）。

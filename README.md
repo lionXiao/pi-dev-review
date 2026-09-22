@@ -123,11 +123,11 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 `run` / `start` 不阻塞主 agent 的回合：引擎在后台继续跑，编辑器下方有一条实时更新的进度条（运行时长 · 最近引擎事件 · 轮次），底部状态栏同步显示。你可以随时继续聊天，主 agent 也能正常回复。机器停止时（pass / blocked / max-rounds）会有一条总结消息自动唤醒主 agent，消息里直接带着停止原因：reason 代码、摘要、决策问题与选项（不是只有一句 "blocked"）。
 
 - 进度条：`dev-review ▶ 运行中 3m12s` + 当前角色与模型行（如 `review r2 · bigfish / gpt-5.6-luna · thinking max`）+ token 使用行（`tokens ↑11.3k ↓4.8k · R246.1k (CH 99.6%) · 61.2 tok/s · TTFT 1.83s (setup 0.42s) · think 2.6k`）+ 最近一条引擎事件 + 时间线路径，每秒更新；底部状态栏同步显示角色；
-- token 统计：引擎按 role+round 写 `reports/usage.json`，`/dev-review status` / `dev_review_status` 输出 `Usage dev/review rN:` 行，timeline 的 dev/review 行尾也附同一摘要。口径：命中率公式与 pi 主状态栏一致（`cacheRead / (input + cacheRead + cacheWrite)`）；**TTFT = 子进程发出 provider 请求 → 首个内容 token**（标准客户端首字口径，含建连、请求上传、网关排队，不含 pi 启动），括号内 `setup` 是其中「请求发出 → SSE 响应头」的准备段；`tok/s` 只算解码段（首 token → 结束，含 reasoning）；
+- token 统计：引擎按 role+round 写 `reports/usage.json`，`/dev-review status` / `dev_review_status` 输出 `Usage dev/review rN:` 行，timeline 的 dev/review 行尾也附同一摘要。口径：命中率公式与 pi 主状态栏一致（`cacheRead / (input + cacheRead + cacheWrite)`）；**TTFT = 子进程发出 provider 请求 → 首个内容 token**（标准客户端首字口径，含建连、请求上传、网关排队，不含 pi 启动），括号内 `setup` 是其中「请求发出 → SSE 响应头」的准备段；`tok/s` 用业界文档化的 throughput 口径：**输出 token（含 reasoning）÷ 请求发出 → 消息结束**（OpenRouter `generation_time` 的定义：「from dispatching the upstream request until its response body ended. Divide the completion token count by this for throughput.」），包含 TTFT、不含工具执行与协调时间；TTFT 单独列出，所以也能反推 Artificial Analysis 的 Output Speed（首 token 起算的解码速度），行尾的 `req` 数是该值合并了多少个请求；
 - **外部启动也能识别**：如果是用 CLI/bash 直接拉起引擎（或上一个 pi 会话遗留的运行），扩展会按轮询跟踪：进度条标注「外部启动」，停止时同样会唤醒主 agent；底部状态栏始终反映磁盘上的真实状态（running rN/blocked(reason)/passed），不依赖谁启动的；
 - **事后补报**：如果运行在扩展观察窗口之外结束（bash 拉起未走扩展、或 block 发生在 reload 之前），下一个回合会自动补报一次停止原因，状态栏与 `dev_review_status` 都带 `blocked (reason)`；
 - **瞬时故障自动重试**：子 agent 因 provider 流中断（如 `stream_read_error`）、网络/超时、异常退出而未产出最终报告时，引擎按 `--agent-retries`（默认 2）自动重跑该轮（复用同一 session；pi 会把出错的那次 assistant 轮次从 provider 输入里剔掉，再接着跑），每次重试写一条 `agent-retry` 时间线；重试仍失败才升级为 `*-protocol-or-execution-error`，摘要里带尝试次数与真实错误码。额度/鉴权失败、用户中止、报告 JSON 协议错误一律不重试（重试也治不好，直接叫人）。
-- **统一时间线**：每个实例有 `reports/timeline.md`，按时间顺序记「plan 冻结 → dev rN → review rN → 决策/升级 → pass」，一行一个事件（时间戳 + 轮次 + 结果 + 摘要 + 产物路径）；running/blocked/ready 时编辑器下方 widget 显示相对路径，`dev_review_status` 输出 `Timeline:` 行；
+- **统一时间线 = 全过程日志**：每个实例的 `reports/timeline.md` 同时是里程碑表和 dev/review 的完整过程日志——「plan 冻结 → dev rN → review rN → 决策/升级 → pass」每个事件一行（时间戳 + 轮次 + 结果 + 摘要 + 产物路径）；事件之间按顺序追加该阶段的 assistant 正文、thinking 标记、工具调用（名称 + 参数一行）与工具结果，阶段头为 `## dev r1 · <model> · <时间>`，所以可直接当 dev+review 拼接日志读，也可以 `tail -f` 边跑边看；工具结果超过 8k 字符时保留头 5k + 尾 3k 并标注省略字符数，thinking 默认只留一行 `🧠 thinking · N tok`（不内联全文，控制体积），逐字原文都在 `private/` 的 session JSONL；`DEV_REVIEW_TRANSCRIPT=full` 内联 thinking 全文，`DEV_REVIEW_TRANSCRIPT=0` 退回只记里程碑。running/blocked/ready 时编辑器下方 widget 显示相对路径，`dev_review_status` 输出 `Timeline:` 行；
 - 随时查询：`dev_review_status` 工具或 `/dev-review status`，blocked 时输出原因、摘要与决策问题/选项，另带 `[run]` 行；
 - 同一时间只允许一个后台运行，重复启动会被拒绝；
 - 新建实例用 `dev_review_start`（工具，plan 哈希变化/新批次必需；可用 `dev_skills` 注入 developer 技能，见 §3.4）；`dev_review_run` 只续跑已有实例，两者都走后台上进；
@@ -175,7 +175,7 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 
 1. **TUI 实时流**：子 Agent 每个工具调用/助手消息/失败以事件形式推到主 TUI（dev/reviewer r{N} 前缀）。设 `DEV_REVIEW_STREAM=0` 关闭。
 2. **每轮条目**：`◆ Development` / `◇ Review` / `⚠ Escalation` markdown 条目追加进会话流（Ctrl+O 展开，含完整 handoff）。
-3. **磁盘全量**：`handoffs/`（每轮 JSON+MD）、`reports/`（最终报告）、`private/*-sessions/*.jsonl`（两边的完整过程，可用 `pi --session-dir ... -r` 交互回看）。
+3. **磁盘全量**：`reports/timeline.md`（里程碑 + 两边完整过程的可读日志，见 §3.3）、`handoffs/`（每轮 JSON+MD）、`reports/final-report.md`（最终报告）、`private/*-sessions/*.jsonl`（逐字原文，可用 `pi --session-dir ... -r` 交互回看）。
 4. **后台运行进度条**：`run` / `start` 后台执行时，编辑器下方显示实时进度（运行时长 + 最近引擎事件），主 agent 回合不被占用；停止时注入总结消息（含 reason / 摘要 / 决策问题与选项）。CLI/bash 直接拉起的「外部启动」由轮询跟踪，同样有进度与停止唤醒；在观察窗口之外结束的运行会在下一回合补报一次原因。
 
 ## 6. 版本 v2 相对原包的改进清单
