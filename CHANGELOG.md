@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — README 补齐停滞检测与无人值守口径
+
+- **停滞检测终于进了 README（新 §3.6）**：此前只在 CHANGELOG 与 `docs/known-issues.md` 里有，README 全文零命中。新节写清五件事：判定是纯代码（计数 + 字符串比对，只声明关联、不宣布同根因）、`stallGate` 阈值与「以 17 个标注 fixture 全绿为契约 + 随实例冻结」、soft 注入（dev 家族级判据 + reviewer 候选确认 `repeat_of`，不命中逐字节不变）、hard 升级（`stalled-issue-family` + 机器生成家族表 + 三选项）、观测数据（`findings.jsonl` / `stallEvents` / timeline 行，以及「旧实例无该文件按空历史处理」）。
+- **§0 口径矛盾修掉**：「不适用」从「追求完全自动、无人值守的批量改动」改为「把验收交给模型自己拍板的完全自动」，并补一段说明 `unattended.md` 是**例外而非反例**（事前一次性授权 + blocked 自判 + `unattended/<date>` 分支与遗留清单 + 早上汇总复核）。
+- **示例口径更正**：第 9 行不再声称「与本机任何真实仓库无关」——stall fixtures 来自真实运行，经 `tools/stall-fixture-map.json` 重命名式假名化（只换路径与项目名，行为文本必须保留否则相似度结构不成立），映射表自身保留源项目名，现在如实写明。
+- 顺便对齐：`install.sh` 覆盖面补上 `tests/fixtures` 与 `tools`；§3.1 补 `--developer-model` / `--reviewer-model` 与其余选项的 `/dev-review help` 指引；§8 补 `DEV_REVIEW_POLL_MS` 与停滞检测运行期注意，并指向 `docs/known-issues.md` 作为完整清单（避免第三个真相源）。
+
 ## Unreleased — 停滞检测的注入文本改为纯英文（未经工作流评审）
 
 > 本节改动发生在停滞检测工作流 `stall-detection-plan--af5a03a4` **pass 之后**，未经 dev-review 独立评审；由人类当场拍板（先提「双写」、看完权衡后定为「纯英文」），改动范围仅提示文本与对应测试，判定/聚类/升级逻辑零改动。中间的双写版本未提交、未安装，已作废。

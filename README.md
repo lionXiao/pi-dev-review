@@ -6,7 +6,7 @@
 
 > 定位：**verification-first** —— 本地优先、可审计、人做最终决定。市场卖「放手」，这里卖「敢放手的前提」。
 
-> 文档内的例子均为脱敏虚构项目（`shop-service` 电商后端，通用 Node 测试命令），与本机任何真实仓库无关。
+> README 内的命令与产物示例均为脱敏虚构项目（`shop-service` 电商后端，通用 Node 测试命令）。例外：`agent/dev-review/tests/fixtures/stall/` 下的回归语料来自真实运行，按 `tools/stall-fixture-map.json` 的映射做了**重命名式假名化**（只替换路径与项目名；行为文本保留，否则相似度结构就不成立），映射表本身保留了源项目名。
 
 ## 0. 与近邻的差异
 
@@ -18,7 +18,9 @@
 | Pi 自带 subagent 示例 | worker → reviewer → worker 链 | 多了轮次预算、协议校验、决策留痕、主 agent 纪律自动注入 |
 
 适用：本地仓库、个人或小团队、对可复现/可审计有要求、愿意为验收付出人工成本。
-不适用：追求完全自动、无人值守的批量改动。
+不适用：把验收交给模型自己拍板的完全自动。
+
+夜间串行批跑（`unattended.md`）是例外而不是反例：它要求人**事前一次性授权**、blocked 先自判（能交给工作流验证的继续验证，验证不了就跳过并标记）、成果提交到 `unattended/<date>` 分支并留「遗留:」清单、早上一次性汇总复核。放手由人授权、可回滚、可审计——这与「让 Agent 自己决定验收」是两件事。
 
 ## 1. 架构与原理
 
@@ -54,7 +56,7 @@
 ```bash
 git clone https://github.com/lionXiao/pi-dev-review.git
 cd pi-dev-review
-bash install.sh        # 装到 ~/.pi/agent/（扩展 + 引擎 + 纪律 + prompt 模板）
+bash install.sh        # 装到 ~/.pi/agent/（扩展 + 引擎 + 纪律 + prompt 模板 + 测试与脱敏语料）
 cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 # 编辑 local.json：developerModel / reviewerModel（必须不同）/ 两个 thinking 档
 ```
@@ -82,7 +84,8 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 - 工作树有"故意要被评审的代码"时加 `--allow-dirty`（仅 start 检查，run 不检查）
 - **多批次总纲 plan**（一份文件多个批次、已验证部分批次）：引擎**不会拆分文件**，dev/reviewer 按文件里的「当前执行批次」标记执行；每次改 plan 内容 → 新 hash → 新实例。主 agent 用 `dev_review_start` 启动这类 plan 时会先返回提醒，让你选 (a) 按当前批次口径直接开始（`confirm_master_plan=true`），还是 (b) 先把这一批的子 plan/范围/做法聊定再启动；你手输 `/dev-review start` 则视为已拍板、直接开始。
 - **产物目录命名（每批一个 plan 文件时不要传 label）**：默认目录名 = `<plan 文件名去扩展名>--<plan 内容 hash 前8位>`，例如 `v1-2-b2c-settings-ia-fix-plan--da037be4`——版本、批次、主题、计划版本一眼可辨（改过 plan 内容会得到新 hash 新目录）。`--workflow <label>` 是**整体替换**这个名字而不是前缀：传 `b2c` 只会得到 `b2c--da037be4`，版本号就没了。所以只有「同一份 plan 要跑出第二个独立实例」（重跑/对照实验）才传 label，并且带上版本，如 `v1.2-b2c-rerun`。
-- 模型可写在 `local.json`，start 时不用传
+- 模型可写在 `local.json`，start 时不用传；也可在命令行传 `--developer-model` / `--reviewer-model`（两者必填其一来源）
+- 其余选项（`--developer-thinking` / `--reviewer-thinking`、`--developer-reset-after <n>`、`--artifact-dir <dir>` 等）见 `/dev-review help`；本文只列常用项
 
 ### 3.2 blocked 时的三种回应方式（任选，效果等价）
 
@@ -158,6 +161,17 @@ cp ~/.pi/agent/dev-review/local.json.example ~/.pi/agent/dev-review/local.json
 /dev-review adopt      # 换机/换 checkout 后接管（.ai-dev-review/ 拷过去之后）
 /dev-review configure  # 改模型/轮数/测试命令
 ```
+
+### 3.6 停滞检测（stall detection）
+
+评审反复发现「下一条可达路径」、开发者只修被点名的那条——同一根因的 finding 家族跨轮存活时，引擎原来毫无感知（真实事故：19 轮 / 11 轮 / max_rounds 被打满）。停滞检测把这件事变成机械信号，命中时只做两件事。
+
+- **判定是纯代码**：`detectStallClusters` 只做计数与字符串比对（同文件、`ref` 显式引用、需求 bigram 相似度、`evidence`/`required_fix` 里的标识符重合、父项是否仍未闭合），union-find 聚成家族。它只声明「这些 finding 与仍未闭合的东西关联紧密」，**不宣布同根因**——语义确认在 reviewer，范围决策在人。
+- **阈值**（`defaults.json` 的 `stallGate`，随实例冻结在 `state.config`，`local.json` 可覆盖；默认开启）：`linkThreshold 1.75`、`reqSim 0.35`、`identSim 0.08`、`softStreak 2`、`softSpan 3`、`hardStreak 3`、`hardSpan 4`。标定以 `tests/fixtures/stall/labels.json` 的 17 个标注 run 全绿为准（3 stalled / 6 churn / 8 healthy），**改阈值要新实例**；`enabled:false` 关闭判定层。
+- **soft 命中**：下一轮 dev 任务包末尾注入家族级验收判据（列出家庭成员、首现轮、最近判定、是否闭合，要求给出根因不变量、逐一列出会违反它的边界，并对每条给出「已修 / 不可达 / 不在本批」的结论与证据）；reviewer 侧另给「未连接候选确认」，要求逐条确认或分离，确认为同源时在新 finding 上写 optional 字段 `repeat_of: "<family id>"`。**不命中则任务包逐字节不变**。
+- **hard 命中**：把实例 block 在 reason `stalled-issue-family`，决策文件里带机器生成的家族表（成员、首现轮、判定链、开放数、跨度、热态文件）与三个结构化选项（① 授权一轮钉死范围的系统性修复；② 登记为已知限制并顺延后续批次；③ 修订计划/口径）。不新增冷却逻辑：连续 hard 由人 resolve 控制。
+- **观测与数据**：每轮 review 追加 `reports/findings.jsonl`（append-only，数据层独立于判定层——`enabled:false` 时仍记录，方便以后打开或离线分析）；每次 soft/hard 触发追加一行 timeline（`stall-soft` / `stall-hard`，含家族、成员、原因、是否注入）并写 `state.stallEvents[]`。旧实例没有 `findings.jsonl` 时按空历史处理（不触发、不报错）。
+- 两段注入文本是**英文指令**（与角色提示词同一惯例：指令用英文，人类可读内容跟随冻结 plan 语言）；家族表里的 requirement 文本不翻译，给人看的硬升级报告仍是中文。
 
 ## 4. 断点恢复
 
@@ -248,3 +262,6 @@ dev 有跨轮私有 session（`private/developer-sessions/`），重启不丢记
 - 测试命令要自足：agent 环境变量依赖（如录制开关）必须在命令里显式写出，否则会出现"循环重试永远失败"。
 - 自动重试为指数退避（默认 5s、10s……），基准可用 `DEV_REVIEW_RETRY_BASE_MS`（毫秒）覆盖，调试/测试用。
 - 多工作流：串行为主；真要并行请用 `git worktree` 开独立目录，不要在同一工作树同时 run 两个。
+- **外部启动的轮询间隔**：默认 10s，`DEV_REVIEW_POLL_MS`（毫秒）可调。
+- **停滞检测的运行期行为**：`reports/findings.jsonl` 可删，等于清空跨轮家族历史（不回滚 `openIssues`，只是不再有家族感知）；`stallGate` 随实例冻结，改阈值需要新实例；`enabled:false` 只关判定层，`findings.jsonl` 仍写。
+- 完整的注意事项清单（含纪律注入、审计文件、隔离边界）见 `docs/known-issues.md`，本节的条目是它的常用子集。
